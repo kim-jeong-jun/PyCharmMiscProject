@@ -6,6 +6,7 @@ EXIF 오류 파일 → ERRORS_DIR 격리.
 """
 import os
 import shutil
+import sys
 import threading
 
 import exifread
@@ -115,7 +116,7 @@ def _sort_inbox_inner():
     counts = {"sorted": 0, "renamed": 0, "duplicate": 0, "error": 0}
     dates: set[str] = set()
 
-    for dirpath, filename in tqdm.tqdm(candidates, desc="분류 중"):
+    for dirpath, filename in tqdm.tqdm(candidates, desc="분류 중", disable=not sys.stdout.isatty()):
         src = os.path.join(dirpath, filename)
         try:
             dst_dir = _get_dest_dir(src)
@@ -130,13 +131,13 @@ def _sort_inbox_inner():
                 shutil.move(src, dst)
                 if os.path.basename(dst) != filename:
                     counts["renamed"] += 1
-                    tqdm.tqdm.write(f"  [이름변경] {filename} → {os.path.basename(dst)}")
+                    print(f"  [이름변경] {filename} → {os.path.basename(dst)}")
                 else:
                     counts["sorted"] += 1
 
         except Exception as e:
             counts["error"] += 1
-            tqdm.tqdm.write(f"  [오류→격리] {filename}: {e}")
+            print(f"  [오류→격리] {filename}: {e}")
             try:
                 os.makedirs(ERRORS_DIR, exist_ok=True)
                 shutil.move(src, os.path.join(ERRORS_DIR, filename))

@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import sys
+
 import tqdm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -56,7 +58,7 @@ def copy_card_to_inbox(mount_point: str) -> int:
 
     os.makedirs(dest_root, exist_ok=True)
     copied = 0
-    for dirpath, filename in tqdm.tqdm(candidates, desc="가져오는 중"):
+    for dirpath, filename in tqdm.tqdm(candidates, desc="가져오는 중", disable=not sys.stdout.isatty()):
         rel = os.path.relpath(dirpath, mount_point)
         dst_dir = os.path.join(dest_root, rel)
         os.makedirs(dst_dir, exist_ok=True)

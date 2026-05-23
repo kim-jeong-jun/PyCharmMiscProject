@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import tqdm
@@ -140,7 +141,7 @@ def distribute():
             skipped_cameras.add(camera)
 
     if skipped_cameras:
-        tqdm.tqdm.write(f"  [경고] HDD 매핑 없는 기종 (config.py 확인): {', '.join(sorted(skipped_cameras))}")
+        print(f"  [경고] HDD 매핑 없는 기종 (config.py 확인): {', '.join(sorted(skipped_cameras))}")
 
     if not jobs:
         return
@@ -154,7 +155,7 @@ def distribute():
     p1_dup = 0
     p1_errors: list[str] = []
 
-    for src, rel, hdd_list in tqdm.tqdm(jobs, desc="1차 저장"):
+    for src, rel, hdd_list in tqdm.tqdm(jobs, desc="1차 저장", disable=not sys.stdout.isatty()):
         hdd = hdd_list[0]
         if not os.path.isdir(hdd):
             p1_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
@@ -213,7 +214,7 @@ def distribute():
     # 이 집합에 포함된 파일은 소스를 삭제하지 않는다.
     _unsafe_rels: set[str] = set()
 
-    for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="2차 저장 및 검증"):
+    for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="2차 저장 및 검증", disable=not sys.stdout.isatty()):
         # 두 번째(이상) HDD에 복사
         for hdd in hdd_list[1:]:
             if not os.path.isdir(hdd):
