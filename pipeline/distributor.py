@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import tqdm
@@ -91,7 +90,9 @@ def _load_manifest(hdd_root: str) -> dict:
     result = {}
     for k, v in raw.items():
         if isinstance(v, str):
-            result[k] = {"sha256": v, "size": None, "verified": None}
+            result[k] = {"sha256": v, "size": None}
+        elif isinstance(v, dict):
+            result[k] = {"sha256": v.get("sha256"), "size": v.get("size")}
         else:
             result[k] = v
     return result
@@ -127,8 +128,7 @@ def _copy_to_hdd(src: str, hdd_root: str, rel_path: str, manifest: dict,
             pass
         raise
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    manifest[rel_path] = {"sha256": src_hash, "size": os.path.getsize(dst), "verified": today}
+    manifest[rel_path] = {"sha256": src_hash, "size": os.path.getsize(dst)}
     return False
 
 

@@ -2,13 +2,13 @@
 Stage 4: HDD 무결성 검사 (매주 일요일 새벽 3시)
 2패스:
   Pass 1 (빠름, 전수): 모든 파일 존재 + 크기 확인
-  Pass 2 (회전식 SHA-256): 시간 예산 내에서 가장 오래전 검증된 파일부터 재계산
+  Pass 2 (랜덤 SHA-256): 시간 예산 내에서 무작위 추출 재계산
 """
 import hashlib
 import json
 import os
+import random
 import time
-from datetime import datetime
 
 from config import (
     CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, DEEP_CHECK_BUDGET_SECONDS,
@@ -40,15 +40,12 @@ def _load_manifest(hdd_root: str) -> dict:
     result = {}
     for k, v in raw.items():
         if isinstance(v, str):
-            result[k] = {"sha256": v, "size": None, "verified": None}
+            result[k] = {"sha256": v, "size": None}
+        elif isinstance(v, dict):
+            result[k] = {"sha256": v.get("sha256"), "size": v.get("size")}
         else:
             result[k] = v
     return result
-
-
-def _save_manifest(hdd_root: str, manifest: dict):
-    with open(os.path.join(hdd_root, MANIFEST_FILENAME), 'w') as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
 
 
 def _check_hdd(hdd_root: str) -> tuple[int, int, int, list[str]]:
@@ -64,20 +61,13 @@ def _check_hdd(hdd_root: str) -> tuple[int, int, int, list[str]]:
     if not manifest:
         return 0, 0, 0, []
 
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # 가장 오래전 검증된(또는 미검증) 항목부터 — Pass 2 순서 결정
-    sorted_entries = sorted(
-        manifest.items(),
-        key=lambda kv: kv[1].get("verified") or "" if isinstance(kv[1], dict) else "",
-    )
-
+    entries = list(manifest.items())
     errors: list[str] = []
     quick_ok = 0
 
     # ── Pass 1: 존재 + 크기 전수확인 ──────────────────────────────────────────
     stat_failed: set[str] = set()
-    for rel, meta in sorted_entries:
+    for rel, meta in entries:
         abs_path = os.path.join(hdd_root, rel)
         if not os.path.isfile(abs_path):
             errors.append(f"파일 없음: {rel}")
@@ -90,16 +80,15 @@ def _check_hdd(hdd_root: str) -> tuple[int, int, int, list[str]]:
             continue
         quick_ok += 1
 
-    # ── Pass 2: 시간 예산 내 순환 SHA-256 ─────────────────────────────────────
+    # ── Pass 2: 랜덤 추출 SHA-256 (시간 예산 내) ──────────────────────────────
     deep_ok = 0
-    manifest_dirty = False
+    candidates = [(r, m) for r, m in entries if r not in stat_failed]
+    random.shuffle(candidates)
     budget_start = time.monotonic()
 
-    for rel, meta in sorted_entries:
+    for rel, meta in candidates:
         if time.monotonic() - budget_start >= DEEP_CHECK_BUDGET_SECONDS:
             break
-        if rel in stat_failed:
-            continue
 
         abs_path = os.path.join(hdd_root, rel)
         expected_sha = meta.get("sha256") if isinstance(meta, dict) else meta
@@ -111,12 +100,6 @@ def _check_hdd(hdd_root: str) -> tuple[int, int, int, list[str]]:
             errors.append(f"체크섬 불일치: {rel}")
         else:
             deep_ok += 1
-            if isinstance(manifest[rel], dict):
-                manifest[rel]["verified"] = today
-                manifest_dirty = True
-
-    if manifest_dirty:
-        _save_manifest(hdd_root, manifest)
 
     return quick_ok, deep_ok, len(manifest), errors
 
@@ -153,11 +136,12 @@ def run_integrity_check():
             status += f" · 오류 {len(errors)}개"
         print(status)
 
-    # 전체 커버 예상 주 수
+    # 통계적 커버 예상 (매주 동일 샘플 수 가정)
     coverage_note = ""
     if total_deep > 0 and total_entries > 0:
-        weeks = -(-total_entries // total_deep)  # ceiling division
-        coverage_note = f"  (전체 커버 예상 {weeks}주)"
+        # P(미검사) = ((N-n)/N)^k → k주 후 기댓값. 실용적으로 ceiling(N/n)으로 표기
+        weeks = -(-total_entries // total_deep)
+        coverage_note = f"  (통계적 전체 커버 약 {weeks}주)"
 
     errors_dir_count = _count_errors_dir()
     if errors_dir_count:
