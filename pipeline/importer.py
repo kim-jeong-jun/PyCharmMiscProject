@@ -2,6 +2,7 @@
 Stage 1: SD/CF 카드 감지 → NVMe inbox/ 복사 → sorter 자동 호출
          바탕화면 드롭 폴더 감시 → inbox/ 이동 → sorter 자동 호출
 """
+import hashlib
 import os
 import shutil
 import threading
@@ -17,9 +18,17 @@ from watchdog.events import FileSystemEventHandler
 
 from config import (
     DESKTOP_DROP_DIR, INBOX_DIR,
-    MOUNT_SETTLE_DELAY, SUPPORTED_EXTENSIONS, WATCH_DIRS,
+    MOUNT_SETTLE_DELAY, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, WATCH_DIRS,
 )
 from notifier import notify
+
+
+def _sha256(filepath: str) -> str:
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ── 드롭 폴더 sort debounce ────────────────────────────────────────────────────
@@ -45,11 +54,12 @@ def copy_card_to_inbox(mount_point: str) -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest_root = os.path.join(INBOX_DIR, f"{timestamp}_{card_name}")
 
+    _all_ext = SUPPORTED_EXTENSIONS + VIDEO_EXTENSIONS
     candidates = [
         (dirpath, f)
         for dirpath, _, filenames in os.walk(mount_point)
         for f in filenames
-        if os.path.splitext(f)[-1].lower() in SUPPORTED_EXTENSIONS
+        if os.path.splitext(f)[-1].lower() in _all_ext
     ]
 
     if not candidates:
@@ -62,7 +72,13 @@ def copy_card_to_inbox(mount_point: str) -> int:
         rel = os.path.relpath(dirpath, mount_point)
         dst_dir = os.path.join(dest_root, rel)
         os.makedirs(dst_dir, exist_ok=True)
-        shutil.copy2(os.path.join(dirpath, filename), os.path.join(dst_dir, filename))
+        dst_file = os.path.join(dst_dir, filename)
+        shutil.copy2(os.path.join(dirpath, filename), dst_file)
+        try:
+            with open(dst_file + ".sha256", "w") as sf:
+                sf.write(_sha256(dst_file))
+        except Exception as e:
+            print(f"  [경고] 사이드카 쓰기 실패: {filename}: {e}")
         copied += 1
 
     print(f"  [가져오기] {copied}개 → {dest_root}")
@@ -140,7 +156,7 @@ class _DropFolderWatcher(FileSystemEventHandler):
 
     def _handle(self, path: str):
         ext = os.path.splitext(path)[-1].lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in SUPPORTED_EXTENSIONS + VIDEO_EXTENSIONS:
             return
         with self._lock:
             if path in self._seen:

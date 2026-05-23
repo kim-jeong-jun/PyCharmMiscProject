@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import tqdm
@@ -16,6 +18,7 @@ import tqdm
 from config import (
     CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, MANIFEST_FILENAME,
     SORTED_DIR, SORTED_WARN_FREE_GB, SUPPORTED_EXTENSIONS,
+    VIDEO_EXTENSIONS, VIDEO_SORTED_DIR, VIDEO_SSD_LIST,
 )
 from notifier import notify
 
@@ -28,7 +31,49 @@ def _sha256(filepath: str) -> str:
     return h.hexdigest()
 
 
-def _prune_manifest(hdd_root: str, manifest: dict[str, str]) -> int:
+def _unmount_hdd(mount_point: str) -> bool:
+    """드라이브 안전 분리(unmount + power-off). 성공 시 True 반환."""
+    try:
+        r = subprocess.run(
+            ["findmnt", "-n", "-o", "SOURCE", mount_point],
+            capture_output=True, text=True, timeout=5,
+        )
+        device = r.stdout.strip()
+        if not device:
+            print(f"  [언마운트] {os.path.basename(mount_point)}: 마운트 정보 없음")
+            return False
+
+        r = subprocess.run(
+            ["udisksctl", "unmount", "-b", device, "--no-user-interaction"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            print(f"  [언마운트 실패] {os.path.basename(mount_point)}: {r.stderr.strip()}")
+            return False
+
+        # 물리 드라이브 스핀다운
+        parent = device.rstrip("0123456789")
+        subprocess.run(
+            ["udisksctl", "power-off", "-b", parent, "--no-user-interaction"],
+            capture_output=True, timeout=10,
+        )
+        print(f"  [안전 제거] {os.path.basename(mount_point)} ({device})")
+        return True
+    except Exception as e:
+        print(f"  [언마운트 오류] {os.path.basename(mount_point)}: {e}")
+        return False
+
+
+def _read_sidecar(path: str) -> str | None:
+    """path.sha256 사이드카에서 해시 읽기. 없으면 None."""
+    try:
+        with open(path + ".sha256") as f:
+            return f.read().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def _prune_manifest(hdd_root: str, manifest: dict) -> int:
     """HDD에 실제로 없는 파일의 manifest 항목 제거. 제거된 수 반환."""
     stale = [rel for rel in list(manifest) if not os.path.isfile(os.path.join(hdd_root, rel))]
     for rel in stale:
@@ -36,30 +81,40 @@ def _prune_manifest(hdd_root: str, manifest: dict[str, str]) -> int:
     return len(stale)
 
 
-def _load_manifest(hdd_root: str) -> dict[str, str]:
+def _load_manifest(hdd_root: str) -> dict:
+    """manifest 로드. 구형 문자열 포맷은 자동 마이그레이션."""
     path = os.path.join(hdd_root, MANIFEST_FILENAME)
-    if os.path.isfile(path):
-        with open(path) as f:
-            return json.load(f)
-    return {}
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        raw = json.load(f)
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, str):
+            result[k] = {"sha256": v, "size": None, "verified": None}
+        else:
+            result[k] = v
+    return result
 
 
-def _save_manifest(hdd_root: str, manifest: dict[str, str]):
+def _save_manifest(hdd_root: str, manifest: dict):
     with open(os.path.join(hdd_root, MANIFEST_FILENAME), 'w') as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
 
-def _copy_to_hdd(src: str, hdd_root: str, rel_path: str, manifest: dict[str, str]) -> bool:
+def _copy_to_hdd(src: str, hdd_root: str, rel_path: str, manifest: dict,
+                 known_hash: str | None = None) -> bool:
     """
     src → hdd_root/rel_path 복사. 이미 존재하면 True(중복 및 스킵) 반환.
     복사 후 SHA-256 검증 수행. 실패 시(디스크 풀·불일치 등) dst 삭제 후 예외 발생.
+    known_hash: 사이드카에서 미리 읽은 해시. 없으면 src를 직접 계산.
     """
     dst = os.path.join(hdd_root, rel_path)
     if os.path.isfile(dst):
         return True
 
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    src_hash = _sha256(src)
+    src_hash = known_hash if known_hash else _sha256(src)
     try:
         shutil.copy2(src, dst)
         dst_hash = _sha256(dst)
@@ -72,7 +127,8 @@ def _copy_to_hdd(src: str, hdd_root: str, rel_path: str, manifest: dict[str, str
             pass
         raise
 
-    manifest[rel_path] = src_hash
+    today = datetime.now().strftime("%Y-%m-%d")
+    manifest[rel_path] = {"sha256": src_hash, "size": os.path.getsize(dst), "verified": today}
     return False
 
 
@@ -146,9 +202,14 @@ def distribute():
     if not jobs:
         return
 
-    manifests: dict[str, dict[str, str]] = {}
+    manifests: dict[str, dict] = {}
     multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
     single_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) == 1]
+    # 연결됐지만 오류가 발생한 HDD → 언마운트 대상에서 제외
+    _hdd_errors: set[str] = set()
+
+    # 사이드카 해시 선독: 배포 중 src를 여러 번 읽지 않도록
+    sidecar_hashes: dict[str, str | None] = {rel: _read_sidecar(src) for src, rel, _ in jobs}
 
     # ── Pass 1: 첫 번째 HDD 복사 ───────────────────────────────────────────────
     p1_copied: dict[str, int] = {}  # hdd 표시명 -> 복사 수
@@ -163,7 +224,7 @@ def distribute():
         if hdd not in manifests:
             manifests[hdd] = _load_manifest(hdd)
         try:
-            is_dup = _copy_to_hdd(src, hdd, rel, manifests[hdd])
+            is_dup = _copy_to_hdd(src, hdd, rel, manifests[hdd], known_hash=sidecar_hashes[rel])
             if is_dup:
                 p1_dup += 1
             else:
@@ -171,6 +232,7 @@ def distribute():
                 p1_copied[name] = p1_copied.get(name, 0) + 1
         except Exception as e:
             p1_errors.append(f"{Path(rel).name}: {e}")
+            _hdd_errors.add(hdd)
 
     for hdd, m in manifests.items():
         _save_manifest(hdd, m)
@@ -194,6 +256,8 @@ def distribute():
     for src, rel, hdd_list in single_jobs:
         if os.path.isfile(os.path.join(hdd_list[0], rel)) and os.path.isfile(src):
             os.remove(src)
+            if os.path.isfile(src + ".sha256"):
+                os.remove(src + ".sha256")
 
     if not multi_jobs:
         _remove_empty_dirs(SORTED_DIR)
@@ -205,6 +269,7 @@ def distribute():
                 _save_manifest(hdd, m)
         if pruned_total:
             print(f"[배포] manifest 고아 항목 {pruned_total}개 정리됨")
+        _do_unmount(manifests, _hdd_errors)
         return
 
     # ── Pass 2: 두 번째 HDD 복사 + 원본 대비 교차 검증 ────────────────────────
@@ -224,26 +289,29 @@ def distribute():
             if hdd not in manifests:
                 manifests[hdd] = _load_manifest(hdd)
             try:
-                is_dup = _copy_to_hdd(src, hdd, rel, manifests[hdd])
+                is_dup = _copy_to_hdd(src, hdd, rel, manifests[hdd], known_hash=sidecar_hashes[rel])
                 if is_dup:
                     p2_dup += 1
             except Exception as e:
                 verify_errors.append(f"{Path(rel).name}: {e}")
                 _unsafe_rels.add(rel)
+                _hdd_errors.add(hdd)
 
-        # 원본 대비 전체 HDD 교차 검증 (모든 HDD, 연결 여부 포함)
+        # 사이드카 해시(없으면 src 직접 계산)로 전체 HDD 교차 검증
         if os.path.isfile(src):
-            src_hash = _sha256(src)
+            src_hash = sidecar_hashes[rel] or _sha256(src)
             for hdd in hdd_list:
                 dst = os.path.join(hdd, rel)
                 if not os.path.isfile(dst):
-                    # 연결된 HDD에 파일이 없거나 미연결
                     _unsafe_rels.add(rel)
+                    if os.path.isdir(hdd):
+                        _hdd_errors.add(hdd)
                 elif _sha256(dst) != src_hash:
                     verify_errors.append(
                         f"교차검증 실패: {Path(rel).name} ({os.path.basename(hdd)})"
                     )
                     _unsafe_rels.add(rel)
+                    _hdd_errors.add(hdd)
 
     for hdd, m in manifests.items():
         _save_manifest(hdd, m)
@@ -256,6 +324,8 @@ def distribute():
         all_present = all(os.path.isfile(os.path.join(hdd, rel)) for hdd in hdd_list)
         if all_present and os.path.isfile(src):
             os.remove(src)
+            if os.path.isfile(src + ".sha256"):
+                os.remove(src + ".sha256")
             backup_count += 1
 
     _remove_empty_dirs(SORTED_DIR)
@@ -296,3 +366,117 @@ def distribute():
             print(f"  [검증 오류] {e}")
 
     notify(title_p2, backup_body, priority=priority, tags=[tag])
+
+    _do_unmount(manifests, _hdd_errors)
+
+
+def _do_unmount(manifests: dict, hdd_errors: set[str]):
+    """오류 없이 완료된 HDD만 안전 분리."""
+    safe = sorted(set(manifests) - hdd_errors)
+    if not safe:
+        return
+    unmounted = [os.path.basename(h) for h in safe if _unmount_hdd(h)]
+    if unmounted:
+        notify("💿 HDD 안전 제거 완료", "  ".join(unmounted), tags=["eject_button"])
+
+
+def distribute_videos():
+    """video_sorted/ 내 영상을 VIDEO_SSD_LIST 모든 SSD에 배포."""
+    if not VIDEO_SSD_LIST:
+        return
+
+    candidates = [
+        os.path.join(dp, f)
+        for dp, _, files in os.walk(VIDEO_SORTED_DIR)
+        for f in files
+        if os.path.splitext(f)[-1].lower() in VIDEO_EXTENSIONS
+    ]
+
+    if not candidates:
+        print("[영상 배포] video_sorted/ 비어있음.")
+        return
+
+    manifests: dict[str, dict] = {}
+    _ssd_errors: set[str] = set()
+    errors: list[str] = []
+    unsafe_rels: set[str] = set()
+    all_dates: set[str] = set()
+
+    # 사이드카 해시 선독
+    sidecar_hashes: dict[str, str | None] = {
+        os.path.relpath(src, VIDEO_SORTED_DIR): _read_sidecar(src) for src in candidates
+    }
+
+    for src in tqdm.tqdm(candidates, desc="영상 배포", disable=not sys.stdout.isatty()):
+        rel = os.path.relpath(src, VIDEO_SORTED_DIR)
+        parts = Path(rel).parts
+        if len(parts) >= 2:
+            all_dates.add(parts[1])  # Year/YYYY-MM-DD/file → parts[1]
+
+        if not os.path.isfile(src):
+            continue
+        known_hash = sidecar_hashes[rel]
+
+        for ssd in VIDEO_SSD_LIST:
+            if not os.path.isdir(ssd):
+                errors.append(f"SSD 미연결: {os.path.basename(ssd)}")
+                unsafe_rels.add(rel)
+                continue
+            if ssd not in manifests:
+                manifests[ssd] = _load_manifest(ssd)
+            try:
+                _copy_to_hdd(src, ssd, rel, manifests[ssd], known_hash=known_hash)
+            except Exception as e:
+                errors.append(f"{Path(rel).name}: {e}")
+                unsafe_rels.add(rel)
+                _ssd_errors.add(ssd)
+
+        # 사이드카 해시로 교차 검증
+        src_hash = known_hash or _sha256(src)
+        for ssd in VIDEO_SSD_LIST:
+            dst = os.path.join(ssd, rel)
+            if not os.path.isfile(dst):
+                unsafe_rels.add(rel)
+                if os.path.isdir(ssd):
+                    _ssd_errors.add(ssd)
+            elif _sha256(dst) != src_hash:
+                errors.append(f"교차검증 실패: {Path(rel).name} ({os.path.basename(ssd)})")
+                unsafe_rels.add(rel)
+                _ssd_errors.add(ssd)
+
+    for ssd, m in manifests.items():
+        _save_manifest(ssd, m)
+
+    # 모든 SSD 검증 완료된 파일만 소스 삭제
+    saved = 0
+    for src in candidates:
+        rel = os.path.relpath(src, VIDEO_SORTED_DIR)
+        if rel in unsafe_rels:
+            continue
+        all_present = all(os.path.isfile(os.path.join(ssd, rel)) for ssd in VIDEO_SSD_LIST)
+        if all_present and os.path.isfile(src):
+            os.remove(src)
+            if os.path.isfile(src + ".sha256"):
+                os.remove(src + ".sha256")
+            saved += 1
+
+    _remove_empty_dirs(VIDEO_SORTED_DIR)
+
+    for ssd, m in manifests.items():
+        pruned = _prune_manifest(ssd, m)
+        if pruned:
+            _save_manifest(ssd, m)
+
+    date_str = _date_range(all_dates)
+    body = (f"{date_str}\n" if date_str else "") + f"총 {saved}개 저장 완료"
+    if errors:
+        preview = "\n".join(errors[:5])
+        body += f"\n오류 {len(errors)}건\n{preview}"
+    has_errors = bool(errors)
+    print(f"\n[영상 배포] {saved}개" + (f"  ({date_str})" if date_str else ""))
+    notify(
+        "⚠️ 영상 배포 오류" if has_errors else "🎬 영상 배포 완료",
+        body,
+        priority="high" if has_errors else "default",
+        tags=["warning" if has_errors else "clapper"],
+    )

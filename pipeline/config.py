@@ -49,11 +49,17 @@ CAMERA_PREFIX_MAP: list[tuple[str, list[str]]] = [
 DISTRIBUTE_AT = "04:00"  # 매일 새벽 4시에 HDD 배포
 CHECK_WEEKDAY = "sunday" # 매주 일요일 새벽 3시에 무결성 검사
 CHECK_AT      = "03:00"
+DEEP_CHECK_BUDGET_SECONDS = 30 * 60  # 주간 SHA-256 순환 검사 시간 한도
 
 # ── 기타 ───────────────────────────────────────────────────────────────────────
 SUPPORTED_EXTENSIONS = ('.nef', '.dng', '.jpg', '.jpeg', '.cr2', '.cr3', '.arw', '.raf')
+VIDEO_EXTENSIONS     = ('.mov', '.mp4', '.mts', '.m2ts', '.avi', '.mkv')
 MANIFEST_FILENAME    = ".photo_manifest.json"  # 각 HDD 루트에 저장되는 체크섬 DB
 ERRORS_DIR           = "/home/jjkim/Photos/inbox_errors"  # EXIF 오류 파일 격리
+
+# ── 영상 파이프라인 ────────────────────────────────────────────────────────────
+VIDEO_SORTED_DIR = "/home/jjkim/Photos/video_sorted"   # NVMe 영상 스테이징
+VIDEO_SSD_LIST   = ["/media/jjkim/SSD_2", "/media/jjkim/SSD_3"]  # 영상 저장 SSD
 
 # ── 경고 임계값 ────────────────────────────────────────────────────────────────
 SORTED_WARN_FREE_GB = 20   # NVMe 여유 공간이 이 GB 미만이면 배포 시 경고

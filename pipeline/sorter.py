@@ -8,13 +8,17 @@ import os
 import shutil
 import sys
 import threading
+from datetime import datetime
 
 import exifread
 import tqdm
 
 _sort_lock = threading.Lock()
 
-from config import ERRORS_DIR, INBOX_DIR, SORTED_DIR, SUPPORTED_EXTENSIONS
+from config import (
+    ERRORS_DIR, INBOX_DIR, SORTED_DIR,
+    SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, VIDEO_SORTED_DIR,
+)
 from notifier import notify
 
 
@@ -33,6 +37,13 @@ def _normalize_camera(tag: dict) -> str:
         if brand.upper() not in model.upper():
             model = f"{brand} {model}"
     return model
+
+
+def _get_video_dest_dir(filepath: str) -> str:
+    """파일 수정 시각 기반으로 VIDEO_SORTED_DIR 내 목적지 디렉터리 반환."""
+    dt = datetime.fromtimestamp(os.path.getmtime(filepath))
+    y, m, d = dt.strftime("%Y"), dt.strftime("%m"), dt.strftime("%d")
+    return os.path.join(VIDEO_SORTED_DIR, y, f"{y}-{m}-{d}")
 
 
 def _get_dest_dir(filepath: str) -> str:
@@ -76,6 +87,18 @@ def _resolve_dest(dst_dir: str, filename: str, src: str) -> tuple[str, bool]:
         counter += 1
 
 
+def _move_sidecar(src: str, dst: str):
+    s = src + ".sha256"
+    if os.path.isfile(s):
+        shutil.move(s, dst + ".sha256")
+
+
+def _remove_sidecar(src: str):
+    s = src + ".sha256"
+    if os.path.isfile(s):
+        os.remove(s)
+
+
 def _remove_empty_dirs(root: str):
     for dirpath, _, _ in os.walk(root, topdown=False):
         if dirpath != root and not os.listdir(dirpath):
@@ -102,11 +125,12 @@ def sort_inbox():
 
 
 def _sort_inbox_inner():
+    _all_ext = SUPPORTED_EXTENSIONS + VIDEO_EXTENSIONS
     candidates = [
         (dirpath, f)
         for dirpath, _, filenames in os.walk(INBOX_DIR)
         for f in filenames
-        if os.path.splitext(f)[-1].lower() in SUPPORTED_EXTENSIONS
+        if os.path.splitext(f)[-1].lower() in _all_ext
     ]
 
     if not candidates:
@@ -118,17 +142,23 @@ def _sort_inbox_inner():
 
     for dirpath, filename in tqdm.tqdm(candidates, desc="분류 중", disable=not sys.stdout.isatty()):
         src = os.path.join(dirpath, filename)
+        ext = os.path.splitext(filename)[-1].lower()
         try:
-            dst_dir = _get_dest_dir(src)
+            if ext in VIDEO_EXTENSIONS:
+                dst_dir = _get_video_dest_dir(src)
+            else:
+                dst_dir = _get_dest_dir(src)
             dates.add(os.path.basename(dst_dir))  # YYYY-MM-DD
             os.makedirs(dst_dir, exist_ok=True)
             dst, is_dup = _resolve_dest(dst_dir, filename, src)
 
             if is_dup:
                 os.remove(src)
+                _remove_sidecar(src)
                 counts["duplicate"] += 1
             else:
                 shutil.move(src, dst)
+                _move_sidecar(src, dst)
                 if os.path.basename(dst) != filename:
                     counts["renamed"] += 1
                     print(f"  [이름변경] {filename} → {os.path.basename(dst)}")
