@@ -47,9 +47,8 @@ CAMERA_PREFIX_MAP: list[tuple[str, list[str]]] = [
 
 # ── 스케줄 ─────────────────────────────────────────────────────────────────────
 DISTRIBUTE_AT = "04:00"  # 매일 새벽 4시에 HDD 배포
-CHECK_WEEKDAY = "sunday" # 매주 일요일 새벽 3시에 무결성 검사
+CHECK_WEEKDAY = "sunday" # 매주 일요일 새벽 3시에 SMART 검사
 CHECK_AT      = "03:00"
-DEEP_CHECK_BUDGET_SECONDS = 30 * 60  # 주간 SHA-256 순환 검사 시간 한도
 
 # ── 기타 ───────────────────────────────────────────────────────────────────────
 SUPPORTED_EXTENSIONS = ('.nef', '.dng', '.jpg', '.jpeg', '.cr2', '.cr3', '.arw', '.raf')

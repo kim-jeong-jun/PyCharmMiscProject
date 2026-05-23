@@ -1,28 +1,71 @@
 """
-Stage 4: HDD 무결성 검사 (매주 일요일 새벽 3시)
-2패스:
-  Pass 1 (빠름, 전수): 모든 파일 존재 + 크기 확인
-  Pass 2 (랜덤 SHA-256): 시간 예산 내에서 무작위 추출 재계산
-"""
-import hashlib
-import json
-import os
-import random
-import time
+Stage 4: HDD SMART 상태 검사 (매주 일요일 새벽 3시)
+파일 해시 재계산 없이 smartctl로 하드웨어 이상만 탐지.
 
-from config import (
-    CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, DEEP_CHECK_BUDGET_SECONDS,
-    ERRORS_DIR, MANIFEST_FILENAME,
-)
+사전 설정 (최초 1회):
+  echo "jjkim ALL=(ALL) NOPASSWD: /usr/sbin/smartctl" | sudo tee /etc/sudoers.d/smartctl
+  sudo chmod 440 /etc/sudoers.d/smartctl
+"""
+import os
+import subprocess
+
+from config import CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, ERRORS_DIR
 from notifier import notify
 
+# SMART 위험 속성 ID → 한국어 이름
+_WARN_ATTRS: dict[str, str] = {
+    "5":   "재할당 섹터",
+    "196": "재할당 이벤트",
+    "197": "펜딩 섹터",
+    "198": "수정불가 섹터",
+}
 
-def _sha256(filepath: str) -> str:
-    h = hashlib.sha256()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
+
+def _device_for_mount(mount_point: str) -> str | None:
+    r = subprocess.run(
+        ["findmnt", "-n", "-o", "SOURCE", mount_point],
+        capture_output=True, text=True, timeout=5,
+    )
+    device = r.stdout.strip()
+    return device if device else None
+
+
+def _smart_check(device: str) -> list[str]:
+    """SMART 이상 항목 반환. 정상이면 빈 리스트."""
+    warnings: list[str] = []
+
+    # ── 전반적 자가진단 결과 ────────────────────────────────────────────────────
+    r = subprocess.run(
+        ["sudo", "-n", "smartctl", "-H", device],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode == 127:
+        return ["smartctl 미설치 (sudo apt install smartmontools)"]
+    if "sudo" in r.stderr.lower() and "password" in r.stderr.lower():
+        return ["smartctl 권한 없음 — /etc/sudoers.d/smartctl 설정 필요"]
+    if "FAILED" in r.stdout:
+        warnings.append("SMART 자가진단 실패 (즉시 데이터 백업 권장)")
+
+    # ── 위험 속성 확인 ──────────────────────────────────────────────────────────
+    r = subprocess.run(
+        ["sudo", "-n", "smartctl", "-A", device],
+        capture_output=True, text=True, timeout=30,
+    )
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 10 or not parts[0].isdigit():
+            continue
+        attr_id = parts[0]
+        if attr_id not in _WARN_ATTRS:
+            continue
+        try:
+            raw = int(parts[9])
+        except ValueError:
+            continue
+        if raw > 0:
+            warnings.append(f"{_WARN_ATTRS[attr_id]} {raw}개")
+
+    return warnings
 
 
 def _count_errors_dir() -> int:
@@ -31,81 +74,8 @@ def _count_errors_dir() -> int:
     return sum(1 for _, _, fs in os.walk(ERRORS_DIR) for _ in fs)
 
 
-def _load_manifest(hdd_root: str) -> dict:
-    path = os.path.join(hdd_root, MANIFEST_FILENAME)
-    if not os.path.isfile(path):
-        return {}
-    with open(path) as f:
-        raw = json.load(f)
-    result = {}
-    for k, v in raw.items():
-        if isinstance(v, str):
-            result[k] = {"sha256": v, "size": None}
-        elif isinstance(v, dict):
-            result[k] = {"sha256": v.get("sha256"), "size": v.get("size")}
-        else:
-            result[k] = v
-    return result
-
-
-def _check_hdd(hdd_root: str) -> tuple[int, int, int, list[str]]:
-    """
-    2패스 무결성 검사.
-    반환: (quick_ok, deep_ok, total_entries, errors)
-    """
-    manifest_path = os.path.join(hdd_root, MANIFEST_FILENAME)
-    if not os.path.isfile(manifest_path):
-        return 0, 0, 0, [f"manifest 없음: {manifest_path}"]
-
-    manifest = _load_manifest(hdd_root)
-    if not manifest:
-        return 0, 0, 0, []
-
-    entries = list(manifest.items())
-    errors: list[str] = []
-    quick_ok = 0
-
-    # ── Pass 1: 존재 + 크기 전수확인 ──────────────────────────────────────────
-    stat_failed: set[str] = set()
-    for rel, meta in entries:
-        abs_path = os.path.join(hdd_root, rel)
-        if not os.path.isfile(abs_path):
-            errors.append(f"파일 없음: {rel}")
-            stat_failed.add(rel)
-            continue
-        expected_size = meta.get("size") if isinstance(meta, dict) else None
-        if expected_size is not None and os.path.getsize(abs_path) != expected_size:
-            errors.append(f"크기 불일치: {rel}")
-            stat_failed.add(rel)
-            continue
-        quick_ok += 1
-
-    # ── Pass 2: 랜덤 추출 SHA-256 (시간 예산 내) ──────────────────────────────
-    deep_ok = 0
-    candidates = [(r, m) for r, m in entries if r not in stat_failed]
-    random.shuffle(candidates)
-    budget_start = time.monotonic()
-
-    for rel, meta in candidates:
-        if time.monotonic() - budget_start >= DEEP_CHECK_BUDGET_SECONDS:
-            break
-
-        abs_path = os.path.join(hdd_root, rel)
-        expected_sha = meta.get("sha256") if isinstance(meta, dict) else meta
-        if not expected_sha:
-            continue
-
-        actual = _sha256(abs_path)
-        if actual != expected_sha:
-            errors.append(f"체크섬 불일치: {rel}")
-        else:
-            deep_ok += 1
-
-    return quick_ok, deep_ok, len(manifest), errors
-
-
 def run_integrity_check():
-    """CAMERA_HDD_MAP에 등록된 모든 HDD 검사."""
+    """CAMERA_HDD_MAP에 등록된 모든 HDD SMART 검사."""
     all_hdds: set[str] = {hdd for lst in CAMERA_HDD_MAP.values() for hdd in lst}
     all_hdds |= {hdd for _, lst in CAMERA_PREFIX_MAP for hdd in lst}
 
@@ -113,57 +83,52 @@ def run_integrity_check():
         print("[검사] CAMERA_HDD_MAP이 비어있습니다.")
         return
 
-    total_quick = 0
-    total_deep = 0
-    total_entries = 0
-    all_errors: list[str] = []
+    checked: list[str] = []
+    skipped: list[str] = []
+    all_warnings: list[str] = []
 
     for hdd in sorted(all_hdds):
+        name = os.path.basename(hdd)
         if not os.path.isdir(hdd):
-            msg = f"HDD 미연결: {hdd}"
-            print(f"  [건너뜀] {msg}")
-            all_errors.append(msg)
+            skipped.append(name)
             continue
 
-        print(f"  검사 중: {os.path.basename(hdd)} ...", end=" ", flush=True)
-        quick_ok, deep_ok, n_entries, errors = _check_hdd(hdd)
-        total_quick += quick_ok
-        total_deep += deep_ok
-        total_entries += n_entries
-        all_errors.extend(f"[{os.path.basename(hdd)}] {e}" for e in errors)
-        status = f"전수확인 {quick_ok}/{n_entries}개 · SHA-256 {deep_ok}개"
-        if errors:
-            status += f" · 오류 {len(errors)}개"
-        print(status)
+        device = _device_for_mount(hdd)
+        if not device:
+            all_warnings.append(f"[{name}] 디바이스 경로 확인 실패")
+            checked.append(name)
+            continue
 
-    # 통계적 커버 예상 (매주 동일 샘플 수 가정)
-    coverage_note = ""
-    if total_deep > 0 and total_entries > 0:
-        # P(미검사) = ((N-n)/N)^k → k주 후 기댓값. 실용적으로 ceiling(N/n)으로 표기
-        weeks = -(-total_entries // total_deep)
-        coverage_note = f"  (통계적 전체 커버 약 {weeks}주)"
+        parent = device.rstrip("0123456789")  # /dev/sda1 → /dev/sda
+        print(f"  SMART 검사: {name} ({parent}) ...", end=" ", flush=True)
+
+        warnings = _smart_check(parent)
+        if warnings:
+            all_warnings.extend(f"[{name}] {w}" for w in warnings)
+            print(f"경고 {len(warnings)}건")
+        else:
+            print("정상")
+        checked.append(name)
 
     errors_dir_count = _count_errors_dir()
     if errors_dir_count:
-        all_errors.append(f"ERRORS_DIR 미처리 파일 {errors_dir_count}개 ({ERRORS_DIR})")
+        all_warnings.append(f"ERRORS_DIR 미처리 파일 {errors_dir_count}개 ({ERRORS_DIR})")
 
-    summary = f"전수확인 {total_quick}개 OK / SHA-256 {total_deep}개{coverage_note}"
+    checked_str = ", ".join(checked) if checked else "없음"
+    skipped_str = f"  미연결: {', '.join(skipped)}" if skipped else ""
+    summary = f"검사: {checked_str}{skipped_str}"
 
-    if all_errors:
-        preview = "\n".join(all_errors[:20])
-        if len(all_errors) > 20:
-            preview += f"\n... 외 {len(all_errors) - 20}개"
-        print(f"\n[무결성 오류]\n{preview}")
+    if all_warnings:
+        preview = "\n".join(all_warnings[:15])
+        if len(all_warnings) > 15:
+            preview += f"\n... 외 {len(all_warnings) - 15}건"
+        print(f"\n[HDD 경고]\n{preview}")
         notify(
-            "🚨 HDD 오류 발견",
-            f"{len(all_errors)}건 발견\n{summary}\n{preview}",
+            "🚨 HDD 상태 경고",
+            f"{len(all_warnings)}건\n{preview}",
             priority="high",
             tags=["warning"],
         )
     else:
         print(f"\n[검사 완료] {summary}")
-        notify(
-            "✅ 무결성 검사 통과",
-            summary,
-            tags=["white_check_mark"],
-        )
+        notify("✅ HDD 상태 정상", summary, tags=["white_check_mark"])
