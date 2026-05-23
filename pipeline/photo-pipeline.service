@@ -1,0 +1,36 @@
+[Unit]
+Description=Photo Import Pipeline
+# 네트워크(ntfy 알림)와 그래픽 세션(미디어 마운트) 이후 시작
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jjkim/PyCharmMiscProject/pipeline
+ExecStart=/home/jjkim/PyCharmMiscProject/.venv/bin/python main.py
+# 비정상 종료 시 10초 후 자동 재시작
+Restart=on-failure
+RestartSec=10
+# 로그는 journald로 (journalctl --user -u photo-pipeline -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=photo-pipeline
+
+[Install]
+WantedBy=default.target
+
+# ── 설치 방법 ──────────────────────────────────────────────────────────────────
+# 1. 서비스 파일 배포
+#    cp photo-pipeline.service ~/.config/systemd/user/
+#
+# 2. 로그인 없이도 실행되도록 linger 활성화 (최초 1회)
+#    loginctl enable-linger $USER
+#
+# 3. 서비스 등록 및 시작
+#    systemctl --user daemon-reload
+#    systemctl --user enable photo-pipeline.service
+#    systemctl --user start  photo-pipeline.service
+#
+# 4. 상태 확인
+#    systemctl --user status photo-pipeline.service
+#    journalctl --user -u photo-pipeline -f
