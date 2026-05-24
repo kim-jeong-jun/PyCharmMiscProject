@@ -99,8 +99,11 @@ def _load_manifest(hdd_root: str) -> dict:
 
 
 def _save_manifest(hdd_root: str, manifest: dict):
-    with open(os.path.join(hdd_root, MANIFEST_FILENAME), 'w') as f:
+    path = os.path.join(hdd_root, MANIFEST_FILENAME)
+    tmp = path + ".tmp"
+    with open(tmp, 'w') as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)  # POSIX 원자적 교체 — 중간 크래시 시 기존 파일 보존
 
 
 def _copy_to_hdd(src: str, hdd_root: str, rel_path: str, manifest: dict,
@@ -256,8 +259,10 @@ def distribute():
     for src, rel, hdd_list in single_jobs:
         if os.path.isfile(os.path.join(hdd_list[0], rel)) and os.path.isfile(src):
             os.remove(src)
-            if os.path.isfile(src + ".sha256"):
+            try:
                 os.remove(src + ".sha256")
+            except OSError:
+                pass
 
     if not multi_jobs:
         _remove_empty_dirs(SORTED_DIR)
@@ -324,8 +329,10 @@ def distribute():
         all_present = all(os.path.isfile(os.path.join(hdd, rel)) for hdd in hdd_list)
         if all_present and os.path.isfile(src):
             os.remove(src)
-            if os.path.isfile(src + ".sha256"):
+            try:
                 os.remove(src + ".sha256")
+            except OSError:
+                pass
             backup_count += 1
 
     _remove_empty_dirs(SORTED_DIR)
@@ -398,6 +405,7 @@ def distribute_videos():
 
     manifests: dict[str, dict] = {}
     _ssd_errors: set[str] = set()
+    _ssd_missing: set[str] = set()  # 미연결 오류는 SSD당 1회만 기록
     errors: list[str] = []
     unsafe_rels: set[str] = set()
     all_dates: set[str] = set()
@@ -419,7 +427,9 @@ def distribute_videos():
 
         for ssd in VIDEO_SSD_LIST:
             if not os.path.isdir(ssd):
-                errors.append(f"SSD 미연결: {os.path.basename(ssd)}")
+                if ssd not in _ssd_missing:
+                    errors.append(f"SSD 미연결: {os.path.basename(ssd)}")
+                    _ssd_missing.add(ssd)
                 unsafe_rels.add(rel)
                 continue
             if ssd not in manifests:
@@ -456,8 +466,10 @@ def distribute_videos():
         all_present = all(os.path.isfile(os.path.join(ssd, rel)) for ssd in VIDEO_SSD_LIST)
         if all_present and os.path.isfile(src):
             os.remove(src)
-            if os.path.isfile(src + ".sha256"):
+            try:
                 os.remove(src + ".sha256")
+            except OSError:
+                pass
             saved += 1
 
     _remove_empty_dirs(VIDEO_SORTED_DIR)

@@ -105,6 +105,19 @@ def _remove_sidecar(src: str):
             pass
 
 
+def _purge_orphan_sidecars(root: str):
+    """대응하는 원본 파일 없는 .sha256 사이드카 삭제."""
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            if f.endswith(".sha256"):
+                main = os.path.join(dirpath, f[:-7])
+                if not os.path.isfile(main):
+                    try:
+                        os.remove(os.path.join(dirpath, f))
+                    except Exception:
+                        pass
+
+
 def _remove_empty_dirs(root: str):
     for dirpath, _, _ in os.walk(root, topdown=False):
         if dirpath != root and not os.listdir(dirpath):
@@ -181,6 +194,7 @@ def _sort_inbox_inner():
                 pass  # 격리도 실패하면 원위치 유지
 
     _remove_empty_dirs(INBOX_DIR)
+    _purge_orphan_sidecars(INBOX_DIR)
 
     total = sum(counts.values())
     date_str = _date_range(dates)
