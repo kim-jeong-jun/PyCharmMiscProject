@@ -234,6 +234,7 @@ def distribute():
             if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, rel)):
                 _need_map[hdd] = _need_map.get(hdd, 0) + sz
     _insufficient: list[str] = []
+    _skip_hdds: set[str] = set()
     for hdd in sorted(_need_map):
         if not os.path.isdir(hdd):
             continue
@@ -241,9 +242,10 @@ def distribute():
         need = _need_map[hdd] / 1024 ** 3
         print(f"  [용량] {os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
         if free < need:
-            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB < 필요 {need:.1f} GB — 배포 건너뜀")
+            _skip_hdds.add(hdd)
     if _insufficient:
-        notify("⚠️ HDD 용량 부족", "\n".join(_insufficient), priority="high", tags=["warning"])
+        notify("⚠️ HDD 용량 부족 — 배포 중단", "\n".join(_insufficient), priority="high", tags=["warning"])
 
     manifests: dict[str, dict] = {}
     multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
@@ -261,6 +263,9 @@ def distribute():
 
     for src, rel, hdd_list in tqdm.tqdm(jobs, desc="1차 저장", disable=not sys.stdout.isatty()):
         hdd = hdd_list[0]
+        if hdd in _skip_hdds:
+            p1_errors.append(f"용량 부족 스킵: {os.path.basename(hdd)}")
+            continue
         if not os.path.isdir(hdd):
             p1_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
             continue
@@ -327,6 +332,9 @@ def distribute():
     for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="2차 저장 및 검증", disable=not sys.stdout.isatty()):
         # 두 번째(이상) HDD에 복사
         for hdd in hdd_list[1:]:
+            if hdd in _skip_hdds:
+                _unsafe_rels.add(rel)
+                continue
             if not os.path.isdir(hdd):
                 verify_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
                 _unsafe_rels.add(rel)
@@ -346,6 +354,9 @@ def distribute():
         if os.path.isfile(src):
             src_hash = sidecar_hashes[rel] or _sha256(src)
             for hdd in hdd_list:
+                if hdd in _skip_hdds:
+                    _unsafe_rels.add(rel)
+                    continue
                 dst = os.path.join(hdd, rel)
                 if not os.path.isfile(dst):
                     _unsafe_rels.add(rel)
@@ -485,6 +496,7 @@ def distribute_jpgs():
             if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, dst_rel)):
                 _need_map[hdd] = _need_map.get(hdd, 0) + sz
     _insufficient: list[str] = []
+    _skip_hdds: set[str] = set()
     for hdd in sorted(_need_map):
         if not os.path.isdir(hdd):
             continue
@@ -492,9 +504,10 @@ def distribute_jpgs():
         need = _need_map[hdd] / 1024 ** 3
         print(f"  [JPG 용량] {os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
         if free < need:
-            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB < 필요 {need:.1f} GB — 배포 건너뜀")
+            _skip_hdds.add(hdd)
     if _insufficient:
-        notify("⚠️ HDD 용량 부족 (JPG)", "\n".join(_insufficient), priority="high", tags=["warning"])
+        notify("⚠️ HDD 용량 부족 — JPG 배포 중단", "\n".join(_insufficient), priority="high", tags=["warning"])
 
     manifests: dict[str, dict] = {}
     multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
@@ -510,6 +523,9 @@ def distribute_jpgs():
 
     for src, rel, hdd_list in tqdm.tqdm(jobs, desc="JPG 1차 저장", disable=not sys.stdout.isatty()):
         hdd = hdd_list[0]
+        if hdd in _skip_hdds:
+            p1_errors.append(f"용량 부족 스킵: {os.path.basename(hdd)}")
+            continue
         if not os.path.isdir(hdd):
             p1_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
             continue
@@ -564,6 +580,9 @@ def distribute_jpgs():
 
     for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="JPG 2차 저장 및 검증", disable=not sys.stdout.isatty()):
         for hdd in hdd_list[1:]:
+            if hdd in _skip_hdds:
+                _unsafe_rels.add(rel)
+                continue
             if not os.path.isdir(hdd):
                 verify_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
                 _unsafe_rels.add(rel)
@@ -583,6 +602,9 @@ def distribute_jpgs():
         if os.path.isfile(src):
             src_hash = sidecar_hashes[rel] or _sha256(src)
             for hdd in hdd_list:
+                if hdd in _skip_hdds:
+                    _unsafe_rels.add(rel)
+                    continue
                 dst = os.path.join(hdd, _jpg_dst_rel(hdd, rel))
                 if not os.path.isfile(dst):
                     _unsafe_rels.add(rel)
@@ -671,6 +693,32 @@ def distribute_videos():
         print("[영상 배포] video_sorted/ 비어있음.")
         return
 
+    # ── 용량 사전 확인 ─────────────────────────────────────────────────────────
+    _need_map: dict[str, int] = {}
+    for src in candidates:
+        rel = os.path.relpath(src, VIDEO_SORTED_DIR)
+        dst_rel = os.path.join("MOV", rel)
+        try:
+            sz = os.path.getsize(src)
+        except OSError:
+            continue
+        for ssd in VIDEO_SSD_LIST:
+            if os.path.isdir(ssd) and not os.path.isfile(os.path.join(ssd, dst_rel)):
+                _need_map[ssd] = _need_map.get(ssd, 0) + sz
+    _insufficient: list[str] = []
+    _skip_ssds: set[str] = set()
+    for ssd in sorted(_need_map):
+        if not os.path.isdir(ssd):
+            continue
+        free = shutil.disk_usage(ssd).free / 1024 ** 3
+        need = _need_map[ssd] / 1024 ** 3
+        print(f"  [영상 용량] {os.path.basename(ssd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+        if free < need:
+            _insufficient.append(f"{os.path.basename(ssd)}: 여유 {free:.1f} GB < 필요 {need:.1f} GB — 배포 건너뜀")
+            _skip_ssds.add(ssd)
+    if _insufficient:
+        notify("⚠️ SSD 용량 부족 — 영상 배포 중단", "\n".join(_insufficient), priority="high", tags=["warning"])
+
     manifests: dict[str, dict] = {}
     _ssd_errors: set[str] = set()
     _ssd_missing: set[str] = set()
@@ -696,6 +744,9 @@ def distribute_videos():
         known_hash = sidecar_hashes[rel]
 
         for ssd in VIDEO_SSD_LIST:
+            if ssd in _skip_ssds:
+                unsafe_rels.add(rel)
+                continue
             if not os.path.isdir(ssd):
                 if ssd not in _ssd_missing:
                     errors.append(f"SSD 미연결: {os.path.basename(ssd)}")
@@ -714,6 +765,9 @@ def distribute_videos():
         # 사이드카 해시로 교차 검증
         src_hash = known_hash or _sha256(src)
         for ssd in VIDEO_SSD_LIST:
+            if ssd in _skip_ssds:
+                unsafe_rels.add(rel)
+                continue
             dst = os.path.join(ssd, dst_rel)
             if not os.path.isfile(dst):
                 unsafe_rels.add(rel)
