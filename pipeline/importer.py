@@ -5,6 +5,7 @@ Stage 1: SD/CF 카드 감지 → NVMe inbox/ 복사 → sorter 자동 호출
 import hashlib
 import os
 import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -21,6 +22,21 @@ from config import (
     MOUNT_SETTLE_DELAY, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, WATCH_DIRS,
 )
 from notifier import notify
+
+
+_CARD_FSTYPES = frozenset({"vfat", "exfat"})
+
+
+def _is_camera_card(mount_point: str) -> bool:
+    """카메라 메모리 카드 여부 확인. vfat/exfat 파일시스템만 허용."""
+    try:
+        r = subprocess.run(
+            ["findmnt", "-n", "-o", "FSTYPE", mount_point],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip().lower() in _CARD_FSTYPES
+    except Exception:
+        return False
 
 
 def _sha256(filepath: str) -> str:
@@ -93,6 +109,9 @@ def copy_card_to_inbox(mount_point: str) -> int:
 class _MountWatcher(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
+            return
+        if not _is_camera_card(event.src_path):
+            print(f"[무시] 카메라 카드 아님 (HDD/SSD): {event.src_path}")
             return
         print(f"\n[카드 감지] {event.src_path}")
         time.sleep(MOUNT_SETTLE_DELAY)
