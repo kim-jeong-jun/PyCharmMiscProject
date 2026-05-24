@@ -90,13 +90,19 @@ def _resolve_dest(dst_dir: str, filename: str, src: str) -> tuple[str, bool]:
 def _move_sidecar(src: str, dst: str):
     s = src + ".sha256"
     if os.path.isfile(s):
-        shutil.move(s, dst + ".sha256")
+        try:
+            shutil.move(s, dst + ".sha256")
+        except Exception:
+            pass
 
 
 def _remove_sidecar(src: str):
     s = src + ".sha256"
     if os.path.isfile(s):
-        os.remove(s)
+        try:
+            os.remove(s)
+        except Exception:
+            pass
 
 
 def _remove_empty_dirs(root: str):
