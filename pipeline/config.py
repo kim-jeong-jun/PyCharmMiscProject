@@ -22,14 +22,29 @@ NTFY_URL   = "https://ntfy.sh"
 NTFY_TOPIC = "jjkim-photo-pipeline"
 
 # ── RAW 배포 매핑: 키는 sorter가 생성하는 폴더명 (CAMERA_NAME_OVERRIDES 적용 후) ──
+#
+# 드라이브 구조 (2026-05-24 확정):
+#   NIKON_0  (7.3TB) : {Camera}/{Year}/{YYYY-MM-DD}/  + JPG/{Camera}/{Year}/{YYYY-MM-DD}/
+#                      전 기종 RAW + JPG 공통 백업
+#   NIKON_1  (3.6TB) : {Camera}/{Year}/{YYYY-MM-DD}/  + JPG/{Camera}/{Year}/{YYYY-MM-DD}/
+#                      D500 제외 모든 Nikon RAW + 전 기종 JPG
+#   NIKON_2  (3.6TB) : {Camera}/{Year}/{YYYY-MM-DD}/
+#                      D500 전용 RAW 백업
+#   LEICA_0/1 (3.6TB): {Camera}/{Year}/{YYYY-MM-DD}/
+#   SSD_0/1  (232GB) : {Camera}/{Year}/{YYYY-MM-DD}/  (Canon, Fujifilm, Panasonic)
+#   SSD_2/3  (232GB) : MOV/{Camera}/                  (영상 flat 구조)
+#
+# CAMERA_PREFIX_MAP 폴백: 명시 없는 기종은 브랜드 prefix로 자동 라우팅
+#   NIKON 5ED, NIKON D200, NIKON D300, NIKON D7200 등 → [NIKON_0, NIKON_1]
+#   LEICA M (Typ 240) 등                              → [LEICA_0, LEICA_1]
+#   Canon EOS 시리즈, Panasonic 시리즈                → [SSD_0, SSD_1]
 CAMERA_HDD_MAP: dict[str, list[str]] = {
     # ── Nikon ────────────────────────────────────────────────────────────────
-    # NIKON_0: 전 기종 공통 백업 / NIKON_1: D500 외 / NIKON_2: D500 전용
     "NIKON D850":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     "NIKON D4S":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     "NIKON D4":    ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     "NIKON D7000": ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
-    "NIKON D500":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_2"],
+    "NIKON D500":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_2"],  # D500: NIKON_2
     "NIKON D800":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     "NIKON Z 7":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     # ── Leica ────────────────────────────────────────────────────────────────
