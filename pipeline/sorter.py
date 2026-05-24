@@ -193,9 +193,10 @@ def _sort_inbox_inner():
                 dst_dir = _get_video_dest_dir(src)
             elif ext in JPG_EXTENSIONS:
                 dst_dir = _get_dest_dir(src, JPG_SORTED_DIR)
+                dates.add(os.path.basename(dst_dir))
             else:
                 dst_dir = _get_dest_dir(src)
-            dates.add(os.path.basename(dst_dir))  # YYYY-MM-DD
+                dates.add(os.path.basename(dst_dir))  # YYYY-MM-DD
             os.makedirs(dst_dir, exist_ok=True)
             dst, is_dup = _resolve_dest(dst_dir, filename, src)
 
@@ -233,9 +234,8 @@ def _sort_inbox_inner():
 
     total = sum(counts.values())
     date_str = _date_range(dates)
-    stat = f"분류 {counts['sorted']}  이름변경 {counts['renamed']}  중복 및 스킵 {counts['duplicate']}"
+    body = f"{counts['sorted']}장" + (f"  {date_str}" if date_str else "")
     if counts['error']:
-        stat += f"  오류 {counts['error']}"
-    body = f"{total}장  {date_str}\n{stat}" if date_str else f"{total}장\n{stat}"
+        body += f"\n오류 {counts['error']}건"
     print(f"\n[분류 완료] {total}장 ({date_str}): 분류 {counts['sorted']} / 이름변경 {counts['renamed']} / 중복 및 스킵 {counts['duplicate']} / 오류 {counts['error']}")
     notify("🗂 분류 완료", body, tags=["card_file_box"])
