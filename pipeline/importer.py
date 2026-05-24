@@ -24,11 +24,11 @@ from config import (
 from notifier import notify
 
 
+_MIN_HDD_SIZE_BYTES = 500 * 1024 ** 3  # 500 GB
+
+
 def _is_camera_card(mount_point: str) -> bool:
-    """
-    USB 이동식 장치(TRAN=usb, RM=1)만 카메라 카드로 허용.
-    내장 SATA/NVMe, USB 외장하드(RM=0) 모두 차단.
-    """
+    """단일 파티션 500 GB 이상 USB 장치는 외장하드로 간주, 처리하지 않음."""
     try:
         r = subprocess.run(
             ["findmnt", "-n", "-o", "SOURCE", mount_point],
@@ -38,15 +38,19 @@ def _is_camera_card(mount_point: str) -> bool:
         if not device:
             return False
         parent = device.rstrip("0123456789")
+
         r = subprocess.run(
-            ["lsblk", "-n", "-d", "-o", "TRAN,RM", parent],
+            ["lsblk", "-n", "-b", "-d", "-o", "TRAN,SIZE", parent],
             capture_output=True, text=True, timeout=5,
         )
         parts = r.stdout.split()
-        if len(parts) < 2:
+        if len(parts) < 2 or parts[0].lower() != "usb":
             return False
-        tran, rm = parts[0].lower(), parts[1].strip()
-        return tran == "usb" and rm == "1"
+        size_bytes = int(parts[1])
+
+        if size_bytes >= _MIN_HDD_SIZE_BYTES:
+            return False
+        return True
     except Exception:
         return False
 
