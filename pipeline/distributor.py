@@ -205,6 +205,28 @@ def distribute():
     if not jobs:
         return
 
+    # ── 용량 사전 확인 ─────────────────────────────────────────────────────
+    _need_map: dict[str, int] = {}
+    for src, rel, hdd_list in jobs:
+        try:
+            sz = os.path.getsize(src)
+        except OSError:
+            continue
+        for hdd in hdd_list:
+            if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, rel)):
+                _need_map[hdd] = _need_map.get(hdd, 0) + sz
+    _insufficient: list[str] = []
+    for hdd in sorted(_need_map):
+        if not os.path.isdir(hdd):
+            continue
+        free = shutil.disk_usage(hdd).free / 1024 ** 3
+        need = _need_map[hdd] / 1024 ** 3
+        print(f"  [용량] {os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+        if free < need:
+            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+    if _insufficient:
+        notify("⚠️ HDD 용량 부족", "\n".join(_insufficient), priority="high", tags=["warning"])
+
     manifests: dict[str, dict] = {}
     multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
     single_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) == 1]
@@ -361,6 +383,13 @@ def distribute():
         if len(verify_errors) > 5:
             preview += f"\n... 외 {len(verify_errors) - 5}건"
         backup_body += f"\n오류 {len(verify_errors)}건\n{preview}"
+
+    _free_lines = "\n".join(
+        f"{os.path.basename(h)}: {shutil.disk_usage(h).free / 1024**3:.1f} GB 남음"
+        for h in sorted(manifests) if os.path.isdir(h)
+    )
+    if _free_lines:
+        backup_body += "\n" + _free_lines
 
     has_errors = bool(verify_errors)
     title_p2 = "⚠️ 백업 오류" if has_errors else "✅ 백업 완료"

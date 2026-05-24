@@ -4,6 +4,7 @@ Stage 1: SD/CF 카드 감지 → NVMe inbox/ 복사 → sorter 자동 호출
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -37,7 +38,8 @@ def _is_camera_card(mount_point: str) -> bool:
         device = r.stdout.strip()
         if not device:
             return False
-        parent = device.rstrip("0123456789")
+        # NVMe: /dev/nvme0n1p1 → /dev/nvme0n1  |  SATA/USB: /dev/sda1 → /dev/sda
+        parent = re.sub(r'p\d+$', '', device) if re.search(r'p\d+$', device) else device.rstrip("0123456789")
 
         r = subprocess.run(
             ["lsblk", "-n", "-b", "-d", "-o", "TRAN,SIZE", parent],
@@ -134,11 +136,11 @@ class _MountWatcher(FileSystemEventHandler):
         try:
             n = copy_card_to_inbox(event.src_path)
             if n > 0:
-                from sorter import sort_inbox
-                sort_inbox()
+                _schedule_sort(delay=1.0)  # 타이머 경유 → lock 충돌 시 자동 재시도 가능
         except Exception as e:
-            # watchdog 스레드에서 예외가 묻히지 않도록 명시적으로 출력
             print(f"[오류] 카드 처리 중 예외 발생: {e}")
+            notify("⚠️ 카드 가져오기 실패", f"{os.path.basename(event.src_path)}\n{e}",
+                   priority="high", tags=["warning"])
 
 
 class _DropFolderWatcher(FileSystemEventHandler):

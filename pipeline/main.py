@@ -18,10 +18,10 @@ import schedule
 
 from config import (
     CHECK_AT, CHECK_WEEKDAY, DISTRIBUTE_AT,
-    INBOX_DIR, SORTED_DIR, STATE_FILE,
+    INBOX_DIR, SORTED_DIR, STATE_FILE, VIDEO_SORTED_DIR,
 )
 from importer import start_watcher
-from distributor import distribute
+from distributor import distribute, distribute_videos
 from checker import run_integrity_check
 from notifier import notify
 
@@ -33,7 +33,7 @@ _WEEKDAY_MAP = {
 
 
 def _ensure_dirs():
-    for d in (INBOX_DIR, SORTED_DIR):
+    for d in (INBOX_DIR, SORTED_DIR, VIDEO_SORTED_DIR):
         os.makedirs(d, exist_ok=True)
 
 
@@ -65,9 +65,15 @@ def _wrapped_distribute():
         print(f"[배포 오류] {e}")
         notify("⚠️ 배포 오류", str(e), priority="high", tags=["warning"])
         return
+    # 사진 배포 성공 기록 (재시작 시 재실행 방지)
     state = _load_state()
     state["distribute_last_run"] = datetime.now().strftime("%Y-%m-%d")
     _save_state(state)
+    try:
+        distribute_videos()
+    except Exception as e:
+        print(f"[영상 배포 오류] {e}")
+        notify("⚠️ 영상 배포 오류", str(e), priority="high", tags=["warning"])
 
 
 def _wrapped_integrity_check():

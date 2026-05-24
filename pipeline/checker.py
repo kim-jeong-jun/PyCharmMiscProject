@@ -7,6 +7,7 @@ Stage 4: HDD SMART 상태 검사 (매주 일요일 새벽 3시)
   sudo chmod 440 /etc/sudoers.d/smartctl
 """
 import os
+import re
 import subprocess
 
 from config import CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, ERRORS_DIR
@@ -45,6 +46,8 @@ def _smart_check(device: str) -> list[str]:
         return ["smartctl 권한 없음 — /etc/sudoers.d/smartctl 설정 필요"]
     if "FAILED" in r.stdout:
         warnings.append("SMART 자가진단 실패 (즉시 데이터 백업 권장)")
+    elif r.returncode != 0 and "PASSED" not in r.stdout:
+        warnings.append(f"SMART 상태 조회 불가 (exit {r.returncode}) — 드라이브 또는 연결 확인 필요")
 
     # ── 위험 속성 확인 ──────────────────────────────────────────────────────────
     r = subprocess.run(
@@ -99,7 +102,8 @@ def run_integrity_check():
             checked.append(name)
             continue
 
-        parent = device.rstrip("0123456789")  # /dev/sda1 → /dev/sda
+        # NVMe: /dev/nvme0n1p1 → /dev/nvme0n1  |  SATA/USB: /dev/sda1 → /dev/sda
+        parent = re.sub(r'p\d+$', '', device) if re.search(r'p\d+$', device) else device.rstrip("0123456789")
         print(f"  SMART 검사: {name} ({parent}) ...", end=" ", flush=True)
 
         warnings = _smart_check(parent)

@@ -21,29 +21,36 @@ NTFY_URL   = "https://ntfy.sh"
 NTFY_TOPIC = "jjkim-photo-pipeline"
 
 # ── 카메라 기종 → HDD 경로 매핑 ────────────────────────────────────────────────
-# 키: sorter.py가 생성하는 폴더명 (Make 정규화 후 EXIF Image Model)
-# Nikon은 현재 NIKON_0만 사용. NIKON_1/2 분배 전략은 추후 결정.
+# 키: sorter.py가 실제로 생성하는 폴더명 (CAMERA_NAME_OVERRIDES 적용 후)
 CAMERA_HDD_MAP: dict[str, list[str]] = {
     # ── Nikon ────────────────────────────────────────────────────────────────
-    "NIKON D850":  ["/media/jjkim/NIKON_0"],
-    "NIKON D4S":   ["/media/jjkim/NIKON_0"],
-    "NIKON D4":    ["/media/jjkim/NIKON_0"],
-    "NIKON D7000": ["/media/jjkim/NIKON_0"],
-    "NIKON D500":  ["/media/jjkim/NIKON_0"],
-    "NIKON D800":  ["/media/jjkim/NIKON_0"],
-    "NIKON Z 7":   ["/media/jjkim/NIKON_0"],   # Z7 EXIF model: "NIKON Z 7"
+    # NIKON_0: 전 기종 공통 백업 / NIKON_1: D500 외 / NIKON_2: D500 전용
+    "NIKON D850":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D4S":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D4":    ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D7000": ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D500":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_2"],
+    "NIKON D800":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON Z 7":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
     # ── Leica ────────────────────────────────────────────────────────────────
-    "LEICA M10":   ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
-    "LEICA M10-R": ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
-    "LEICA M8":    ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
-    "LEICA X2":    ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "LEICA M10":        ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "LEICA M10-R":      ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "M8 Digital Camera":["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "LEICA X2":         ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
 }
 
-# 위 목록에 없는 기종을 브랜드 prefix로 폴백 (sorter가 항상 "NIKON ..." / "LEICA ..." 형태로 정규화)
+# 위 목록에 없는 기종을 브랜드 prefix로 폴백
 CAMERA_PREFIX_MAP: list[tuple[str, list[str]]] = [
-    ("NIKON", ["/media/jjkim/NIKON_0"]),
+    ("NIKON", ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"]),
     ("LEICA", ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"]),
 ]
+
+# ── EXIF 정규화 이름 → 드라이브 실제 폴더명 오버라이드 ──────────────────────────
+# sorter._normalize_camera() 결과가 기존 드라이브 구조와 다를 때 여기서 맞춤.
+# 키: _normalize_camera 출력, 값: 드라이브에 실제로 쓸 폴더명
+CAMERA_NAME_OVERRIDES: dict[str, str] = {
+    "Leica M8 Digital Camera": "M8 Digital Camera",  # EXIF Make: "Leica Camera AG"
+}
 
 # ── 스케줄 ─────────────────────────────────────────────────────────────────────
 DISTRIBUTE_AT = "04:00"  # 매일 새벽 4시에 HDD 배포

@@ -16,6 +16,7 @@ import tqdm
 _sort_lock = threading.Lock()
 
 from config import (
+    CAMERA_NAME_OVERRIDES,
     ERRORS_DIR, INBOX_DIR, SORTED_DIR,
     SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, VIDEO_SORTED_DIR,
 )
@@ -36,7 +37,7 @@ def _normalize_camera(tag: dict) -> str:
         brand = make.split()[0]
         if brand.upper() not in model.upper():
             model = f"{brand} {model}"
-    return model
+    return CAMERA_NAME_OVERRIDES.get(model, model)
 
 
 def _get_video_dest_dir(filepath: str) -> str:
@@ -189,7 +190,14 @@ def _sort_inbox_inner():
             print(f"  [오류→격리] {filename}: {e}")
             try:
                 os.makedirs(ERRORS_DIR, exist_ok=True)
-                shutil.move(src, os.path.join(ERRORS_DIR, filename))
+                err_dst = os.path.join(ERRORS_DIR, filename)
+                if os.path.exists(err_dst):
+                    stem, ext = os.path.splitext(filename)
+                    i = 1
+                    while os.path.exists(err_dst):
+                        err_dst = os.path.join(ERRORS_DIR, f"{stem}_{i}{ext}")
+                        i += 1
+                shutil.move(src, err_dst)
             except Exception:
                 pass  # 격리도 실패하면 원위치 유지
 

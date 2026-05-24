@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/jjkim/PyCharmMiscProject/pipeline
 ExecStart=/home/jjkim/PyCharmMiscProject/.venv/bin/python main.py
+Environment=PYTHONUNBUFFERED=1
 # 비정상 종료 시 10초 후 자동 재시작
 Restart=on-failure
 RestartSec=10
