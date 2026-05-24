@@ -234,8 +234,6 @@ def _sort_inbox_inner():
 
     total = sum(counts.values())
     date_str = _date_range(dates)
-    body = f"{counts['sorted']}장" + (f"  {date_str}" if date_str else "")
-    if counts['error']:
-        body += f"\n오류 {counts['error']}건"
     print(f"\n[분류 완료] {total}장 ({date_str}): 분류 {counts['sorted']} / 이름변경 {counts['renamed']} / 중복 및 스킵 {counts['duplicate']} / 오류 {counts['error']}")
-    notify("🗂 분류 완료", body, tags=["card_file_box"])
+    if counts['error']:
+        notify("🗂 분류 오류", f"{counts['error']}건\n{date_str}", priority="high", tags=["warning"])
