@@ -1,11 +1,16 @@
 """
-Stage 2: NVMe inbox/ → sorted/Camera/Year/YYYY-MM-DD/
+Stage 2: NVMe inbox/ 분류
+  RAW  → sorted/Camera/Year/YYYY-MM-DD/
+  JPG  → jpg_sorted/Camera/Year/YYYY-MM-DD/
+  영상 → video_sorted/Camera/  (flat, exiftool로 카메라명 추출)
 중복(같은 경로·같은 크기) → 삭제.
 이름 충돌이지만 크기 다름(시퀀스 번호 롤오버 등) → 새 이름으로 저장.
 EXIF 오류 파일 → ERRORS_DIR 격리.
 """
+import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -40,11 +45,31 @@ def _normalize_camera(tag: dict) -> str:
     return CAMERA_NAME_OVERRIDES.get(model, model)
 
 
+def _get_video_camera(filepath: str) -> str:
+    """exiftool로 영상 파일의 카메라명 반환. 실패 시 'Misc'."""
+    try:
+        r = subprocess.run(
+            ["exiftool", "-Make", "-Model", "-j", filepath],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return "Misc"
+        data = json.loads(r.stdout)[0]
+        make  = str(data.get("Make",  "")).strip()
+        model = str(data.get("Model", "")).strip() or "Misc"
+        if make:
+            brand = make.split()[0]
+            if brand.upper() not in model.upper():
+                model = f"{brand} {model}"
+        return CAMERA_NAME_OVERRIDES.get(model, model) or "Misc"
+    except Exception:
+        return "Misc"
+
+
 def _get_video_dest_dir(filepath: str) -> str:
-    """파일 수정 시각 기반으로 VIDEO_SORTED_DIR 내 목적지 디렉터리 반환."""
-    dt = datetime.fromtimestamp(os.path.getmtime(filepath))
-    y, m, d = dt.strftime("%Y"), dt.strftime("%m"), dt.strftime("%d")
-    return os.path.join(VIDEO_SORTED_DIR, y, f"{y}-{m}-{d}")
+    """카메라 기종별로 VIDEO_SORTED_DIR 내 목적지 디렉터리 반환 (flat, 날짜 없음)."""
+    camera = _get_video_camera(filepath)
+    return os.path.join(VIDEO_SORTED_DIR, camera)
 
 
 def _get_dest_dir(filepath: str, base_dir: str = SORTED_DIR) -> str:

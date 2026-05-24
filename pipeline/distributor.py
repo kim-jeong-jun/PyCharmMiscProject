@@ -654,7 +654,9 @@ def distribute_jpgs():
 
 
 def distribute_videos():
-    """video_sorted/ 내 영상을 VIDEO_SSD_LIST 모든 SSD에 배포."""
+    """video_sorted/ 내 영상을 VIDEO_SSD_LIST 모든 SSD에 배포.
+    SSD 목적지: MOV/{Camera}/파일.ext (기존 드라이브 구조 일치)
+    """
     if not VIDEO_SSD_LIST:
         return
 
@@ -671,10 +673,10 @@ def distribute_videos():
 
     manifests: dict[str, dict] = {}
     _ssd_errors: set[str] = set()
-    _ssd_missing: set[str] = set()  # 미연결 오류는 SSD당 1회만 기록
+    _ssd_missing: set[str] = set()
     errors: list[str] = []
     unsafe_rels: set[str] = set()
-    all_dates: set[str] = set()
+    all_cameras: set[str] = set()
 
     # 사이드카 해시 선독
     sidecar_hashes: dict[str, str | None] = {
@@ -683,9 +685,11 @@ def distribute_videos():
 
     for src in tqdm.tqdm(candidates, desc="영상 배포", disable=not sys.stdout.isatty()):
         rel = os.path.relpath(src, VIDEO_SORTED_DIR)
+        # rel = {Camera}/filename  →  dst_rel = MOV/{Camera}/filename
+        dst_rel = os.path.join("MOV", rel)
         parts = Path(rel).parts
-        if len(parts) >= 2:
-            all_dates.add(parts[1])  # Year/YYYY-MM-DD/file → parts[1]
+        if parts:
+            all_cameras.add(parts[0])
 
         if not os.path.isfile(src):
             continue
@@ -701,7 +705,7 @@ def distribute_videos():
             if ssd not in manifests:
                 manifests[ssd] = _load_manifest(ssd)
             try:
-                _copy_to_hdd(src, ssd, rel, manifests[ssd], known_hash=known_hash)
+                _copy_to_hdd(src, ssd, dst_rel, manifests[ssd], known_hash=known_hash)
             except Exception as e:
                 errors.append(f"{Path(rel).name}: {e}")
                 unsafe_rels.add(rel)
@@ -710,7 +714,7 @@ def distribute_videos():
         # 사이드카 해시로 교차 검증
         src_hash = known_hash or _sha256(src)
         for ssd in VIDEO_SSD_LIST:
-            dst = os.path.join(ssd, rel)
+            dst = os.path.join(ssd, dst_rel)
             if not os.path.isfile(dst):
                 unsafe_rels.add(rel)
                 if os.path.isdir(ssd):
@@ -727,9 +731,10 @@ def distribute_videos():
     saved = 0
     for src in candidates:
         rel = os.path.relpath(src, VIDEO_SORTED_DIR)
+        dst_rel = os.path.join("MOV", rel)
         if rel in unsafe_rels:
             continue
-        all_present = all(os.path.isfile(os.path.join(ssd, rel)) for ssd in VIDEO_SSD_LIST)
+        all_present = all(os.path.isfile(os.path.join(ssd, dst_rel)) for ssd in VIDEO_SSD_LIST)
         if all_present and os.path.isfile(src):
             os.remove(src)
             try:
@@ -745,13 +750,13 @@ def distribute_videos():
         if pruned:
             _save_manifest(ssd, m)
 
-    date_str = _date_range(all_dates)
-    body = (f"{date_str}\n" if date_str else "") + f"총 {saved}개 저장 완료"
+    cam_str = ", ".join(sorted(all_cameras)) if all_cameras else ""
+    body = (f"{cam_str}\n" if cam_str else "") + f"총 {saved}개 저장 완료"
     if errors:
         preview = "\n".join(errors[:5])
         body += f"\n오류 {len(errors)}건\n{preview}"
     has_errors = bool(errors)
-    print(f"\n[영상 배포] {saved}개" + (f"  ({date_str})" if date_str else ""))
+    print(f"\n[영상 배포] {saved}개" + (f"  ({cam_str})" if cam_str else ""))
     notify(
         "⚠️ 영상 배포 오류" if has_errors else "🎬 영상 배포 완료",
         body,
