@@ -17,8 +17,8 @@ _sort_lock = threading.Lock()
 
 from config import (
     CAMERA_NAME_OVERRIDES,
-    ERRORS_DIR, INBOX_DIR, SORTED_DIR,
-    SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, VIDEO_SORTED_DIR,
+    ERRORS_DIR, INBOX_DIR, JPG_SORTED_DIR, SORTED_DIR,
+    SUPPORTED_EXTENSIONS, JPG_EXTENSIONS, VIDEO_EXTENSIONS, VIDEO_SORTED_DIR,
 )
 from notifier import notify
 
@@ -47,8 +47,8 @@ def _get_video_dest_dir(filepath: str) -> str:
     return os.path.join(VIDEO_SORTED_DIR, y, f"{y}-{m}-{d}")
 
 
-def _get_dest_dir(filepath: str) -> str:
-    """EXIF 기반으로 sorted/ 내 목적지 디렉터리 반환."""
+def _get_dest_dir(filepath: str, base_dir: str = SORTED_DIR) -> str:
+    """EXIF 기반으로 base_dir 내 목적지 디렉터리 반환."""
     with open(filepath, 'rb') as f:
         # stop_tag: Make/Model은 IFD0에서 먼저 읽힘 → DateTimeOriginal 발견 시 중단해도 OK
         tag = exifread.process_file(f, stop_tag='EXIF DateTimeOriginal')
@@ -61,7 +61,7 @@ def _get_dest_dir(filepath: str) -> str:
     except (IndexError, ValueError):
         y, m, d = "0000", "00", "00"
 
-    return os.path.join(SORTED_DIR, camera, y, f"{y}-{m}-{d}")
+    return os.path.join(base_dir, camera, y, f"{y}-{m}-{d}")
 
 
 def _resolve_dest(dst_dir: str, filename: str, src: str) -> tuple[str, bool]:
@@ -166,6 +166,8 @@ def _sort_inbox_inner():
         try:
             if ext in VIDEO_EXTENSIONS:
                 dst_dir = _get_video_dest_dir(src)
+            elif ext in JPG_EXTENSIONS:
+                dst_dir = _get_dest_dir(src, JPG_SORTED_DIR)
             else:
                 dst_dir = _get_dest_dir(src)
             dates.add(os.path.basename(dst_dir))  # YYYY-MM-DD

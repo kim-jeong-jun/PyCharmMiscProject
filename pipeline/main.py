@@ -18,10 +18,10 @@ import schedule
 
 from config import (
     CHECK_AT, CHECK_WEEKDAY, DISTRIBUTE_AT,
-    INBOX_DIR, SORTED_DIR, STATE_FILE, VIDEO_SORTED_DIR,
+    INBOX_DIR, JPG_SORTED_DIR, SORTED_DIR, STATE_FILE, VIDEO_SORTED_DIR,
 )
 from importer import start_watcher
-from distributor import distribute, distribute_videos
+from distributor import distribute, distribute_jpgs, distribute_videos
 from checker import run_integrity_check
 from notifier import notify
 
@@ -33,7 +33,7 @@ _WEEKDAY_MAP = {
 
 
 def _ensure_dirs():
-    for d in (INBOX_DIR, SORTED_DIR, VIDEO_SORTED_DIR):
+    for d in (INBOX_DIR, SORTED_DIR, JPG_SORTED_DIR, VIDEO_SORTED_DIR):
         os.makedirs(d, exist_ok=True)
 
 
@@ -59,6 +59,13 @@ def _save_state(state: dict):
 # ── 스케줄 job 래퍼 (예외 격리 + 상태 기록) ─────────────────────────────────────
 
 def _wrapped_distribute():
+    # JPG 먼저 배포 (드라이브 언마운트 없음 — distribute()가 이후에 담당)
+    try:
+        distribute_jpgs()
+    except Exception as e:
+        print(f"[JPG 배포 오류] {e}")
+        notify("⚠️ JPG 배포 오류", str(e), priority="high", tags=["warning"])
+    # RAW 배포 + 드라이브 언마운트
     try:
         distribute()
     except Exception as e:

@@ -2,8 +2,9 @@ import os
 import getpass
 
 # ── NVMe 경로 ──────────────────────────────────────────────────────────────────
-INBOX_DIR  = "/home/jjkim/Photos/inbox"   # 카드 → NVMe 임시 보관
-SORTED_DIR = "/home/jjkim/Photos/sorted"  # NVMe 내 분류 완료본
+INBOX_DIR      = "/home/jjkim/Photos/inbox"       # 카드 → NVMe 임시 보관
+SORTED_DIR     = "/home/jjkim/Photos/sorted"      # NVMe 내 RAW 분류 완료본
+JPG_SORTED_DIR = "/home/jjkim/Photos/jpg_sorted"  # NVMe 내 JPG 스테이징
 
 # ── SD/CF 카드 감시 경로 ───────────────────────────────────────────────────────
 _user = getpass.getuser()
@@ -20,8 +21,7 @@ MOUNT_SETTLE_DELAY = 3  # 마운트 후 읽기 시작까지 대기 (초)
 NTFY_URL   = "https://ntfy.sh"
 NTFY_TOPIC = "jjkim-photo-pipeline"
 
-# ── 카메라 기종 → HDD 경로 매핑 ────────────────────────────────────────────────
-# 키: sorter.py가 실제로 생성하는 폴더명 (CAMERA_NAME_OVERRIDES 적용 후)
+# ── RAW 배포 매핑: 키는 sorter가 생성하는 폴더명 (CAMERA_NAME_OVERRIDES 적용 후) ──
 CAMERA_HDD_MAP: dict[str, list[str]] = {
     # ── Nikon ────────────────────────────────────────────────────────────────
     # NIKON_0: 전 기종 공통 백업 / NIKON_1: D500 외 / NIKON_2: D500 전용
@@ -37,19 +37,58 @@ CAMERA_HDD_MAP: dict[str, list[str]] = {
     "LEICA M10-R":      ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "M8 Digital Camera":["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "LEICA X2":         ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    # ── Fujifilm (override로 brand prefix 제거된 모델은 명시적으로 등록) ──────
+    "X-T5":   ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
+    "GFX-50": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
 }
 
 # 위 목록에 없는 기종을 브랜드 prefix로 폴백
 CAMERA_PREFIX_MAP: list[tuple[str, list[str]]] = [
-    ("NIKON", ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"]),
-    ("LEICA", ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"]),
+    ("NIKON",     ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"]),
+    ("LEICA",     ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"]),
+    ("CANON",     ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
+    ("FUJIFILM",  ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
+    ("PANASONIC", ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
 ]
+
+# ── JPG 배포 매핑 (RAW와 차이: D500 → NIKON_2 대신 NIKON_1) ─────────────────
+CAMERA_JPG_HDD_MAP: dict[str, list[str]] = {
+    "NIKON D850":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D4S":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D4":    ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D7000": ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON D500":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],  # RAW와 달리 NIKON_1
+    "NIKON D800":  ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "NIKON Z 7":   ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"],
+    "LEICA M10":        ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "LEICA M10-R":      ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "M8 Digital Camera":["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "LEICA X2":         ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "X-T5":   ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
+    "GFX-50": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
+}
+CAMERA_JPG_PREFIX_MAP: list[tuple[str, list[str]]] = [
+    ("NIKON",     ["/media/jjkim/NIKON_0", "/media/jjkim/NIKON_1"]),
+    ("LEICA",     ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"]),
+    ("CANON",     ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
+    ("FUJIFILM",  ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
+    ("PANASONIC", ["/media/jjkim/SSD_0",   "/media/jjkim/SSD_1"]),
+]
+
+# NIKON 드라이브에서는 JPG를 JPG/ 하위 폴더에 저장 (기존 드라이브 구조 일치)
+JPG_PREFIX_HDDS: frozenset[str] = frozenset({
+    "/media/jjkim/NIKON_0",
+    "/media/jjkim/NIKON_1",
+})
 
 # ── EXIF 정규화 이름 → 드라이브 실제 폴더명 오버라이드 ──────────────────────────
 # sorter._normalize_camera() 결과가 기존 드라이브 구조와 다를 때 여기서 맞춤.
 # 키: _normalize_camera 출력, 값: 드라이브에 실제로 쓸 폴더명
 CAMERA_NAME_OVERRIDES: dict[str, str] = {
     "Leica M8 Digital Camera": "M8 Digital Camera",  # EXIF Make: "Leica Camera AG"
+    "FUJIFILM X-Pro1":  "Fujifilm X-Pro1",            # 대소문자 불일치
+    "FUJIFILM X-T5":    "X-T5",                       # brand prefix 없는 폴더명
+    "FUJIFILM GFX100 II": "GFX-50",                   # 폴더명이 기종과 다름
 }
 
 # ── 스케줄 ─────────────────────────────────────────────────────────────────────
@@ -59,6 +98,7 @@ CHECK_AT      = "03:00"
 
 # ── 기타 ───────────────────────────────────────────────────────────────────────
 SUPPORTED_EXTENSIONS = ('.nef', '.dng', '.jpg', '.jpeg', '.cr2', '.cr3', '.arw', '.raf')
+JPG_EXTENSIONS       = ('.jpg', '.jpeg')
 VIDEO_EXTENSIONS     = ('.mov', '.mp4', '.mts', '.m2ts', '.avi', '.mkv')
 MANIFEST_FILENAME    = ".photo_manifest.json"  # 각 HDD 루트에 저장되는 체크섬 DB
 ERRORS_DIR           = "/home/jjkim/Photos/inbox_errors"  # EXIF 오류 파일 격리

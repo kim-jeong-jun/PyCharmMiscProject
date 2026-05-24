@@ -15,7 +15,10 @@ from pathlib import Path
 import tqdm
 
 from config import (
-    CAMERA_HDD_MAP, CAMERA_PREFIX_MAP, MANIFEST_FILENAME,
+    CAMERA_HDD_MAP, CAMERA_PREFIX_MAP,
+    CAMERA_JPG_HDD_MAP, CAMERA_JPG_PREFIX_MAP, JPG_PREFIX_HDDS,
+    JPG_EXTENSIONS, JPG_SORTED_DIR,
+    MANIFEST_FILENAME,
     SORTED_DIR, SORTED_WARN_FREE_GB, SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS, VIDEO_SORTED_DIR, VIDEO_SSD_LIST,
 )
@@ -143,6 +146,21 @@ def _get_hdds_for_camera(camera: str) -> list[str] | None:
         if upper.startswith(prefix.upper()):
             return hdd_list
     return None
+
+
+def _get_hdds_for_jpg_camera(camera: str) -> list[str] | None:
+    if camera in CAMERA_JPG_HDD_MAP:
+        return CAMERA_JPG_HDD_MAP[camera]
+    upper = camera.upper()
+    for prefix, hdd_list in CAMERA_JPG_PREFIX_MAP:
+        if upper.startswith(prefix.upper()):
+            return hdd_list
+    return None
+
+
+def _jpg_dst_rel(hdd: str, rel: str) -> str:
+    """NIKON 드라이브는 JPG/ 하위에 저장, 나머지는 루트에 저장."""
+    return os.path.join("JPG", rel) if hdd in JPG_PREFIX_HDDS else rel
 
 
 def _remove_empty_dirs(root: str):
@@ -414,6 +432,225 @@ def _do_unmount(manifests: dict, hdd_errors: set[str]):
     unmounted = [os.path.basename(h) for h in safe if _unmount_hdd(h)]
     if unmounted:
         notify("💿 HDD 안전 제거 완료", "  ".join(unmounted), tags=["eject_button"])
+
+
+def distribute_jpgs():
+    """jpg_sorted/ 내 JPG 파일을 HDDs에 배포.
+    NIKON 드라이브(JPG_PREFIX_HDDS)는 JPG/ 하위, 기타 드라이브는 루트에 저장.
+    _do_unmount 미호출 — distribute()가 이후에 unmount 담당.
+    """
+    candidates = [
+        (dirpath, f)
+        for dirpath, _, filenames in os.walk(JPG_SORTED_DIR)
+        for f in filenames
+        if os.path.splitext(f)[-1].lower() in JPG_EXTENSIONS
+    ]
+
+    if not candidates:
+        print("[JPG 배포] jpg_sorted/ 비어있음.")
+        return
+
+    jobs: list[tuple[str, str, list[str]]] = []
+    skipped_cameras: set[str] = set()
+    all_dates: set[str] = set()
+
+    for dirpath, filename in candidates:
+        src = os.path.join(dirpath, filename)
+        rel = os.path.relpath(src, JPG_SORTED_DIR)
+        parts = Path(rel).parts
+        camera = parts[0]
+        if len(parts) >= 3:
+            all_dates.add(parts[2])
+        hdd_list = _get_hdds_for_jpg_camera(camera)
+        if hdd_list:
+            jobs.append((src, rel, hdd_list))
+        else:
+            skipped_cameras.add(camera)
+
+    if skipped_cameras:
+        print(f"  [경고] JPG HDD 매핑 없는 기종 (config.py 확인): {', '.join(sorted(skipped_cameras))}")
+
+    if not jobs:
+        return
+
+    # ── 용량 사전 확인 ─────────────────────────────────────────────────────────
+    _need_map: dict[str, int] = {}
+    for src, rel, hdd_list in jobs:
+        try:
+            sz = os.path.getsize(src)
+        except OSError:
+            continue
+        for hdd in hdd_list:
+            dst_rel = _jpg_dst_rel(hdd, rel)
+            if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, dst_rel)):
+                _need_map[hdd] = _need_map.get(hdd, 0) + sz
+    _insufficient: list[str] = []
+    for hdd in sorted(_need_map):
+        if not os.path.isdir(hdd):
+            continue
+        free = shutil.disk_usage(hdd).free / 1024 ** 3
+        need = _need_map[hdd] / 1024 ** 3
+        print(f"  [JPG 용량] {os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+        if free < need:
+            _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB / 필요 {need:.1f} GB")
+    if _insufficient:
+        notify("⚠️ HDD 용량 부족 (JPG)", "\n".join(_insufficient), priority="high", tags=["warning"])
+
+    manifests: dict[str, dict] = {}
+    multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
+    single_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) == 1]
+    _hdd_errors: set[str] = set()
+
+    sidecar_hashes: dict[str, str | None] = {rel: _read_sidecar(src) for src, rel, _ in jobs}
+
+    # ── Pass 1: 첫 번째 HDD 복사 ───────────────────────────────────────────────
+    p1_copied: dict[str, int] = {}
+    p1_dup = 0
+    p1_errors: list[str] = []
+
+    for src, rel, hdd_list in tqdm.tqdm(jobs, desc="JPG 1차 저장", disable=not sys.stdout.isatty()):
+        hdd = hdd_list[0]
+        if not os.path.isdir(hdd):
+            p1_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
+            continue
+        if hdd not in manifests:
+            manifests[hdd] = _load_manifest(hdd)
+        try:
+            dst_rel = _jpg_dst_rel(hdd, rel)
+            is_dup = _copy_to_hdd(src, hdd, dst_rel, manifests[hdd], known_hash=sidecar_hashes[rel])
+            if is_dup:
+                p1_dup += 1
+            else:
+                name = os.path.basename(hdd)
+                p1_copied[name] = p1_copied.get(name, 0) + 1
+        except Exception as e:
+            p1_errors.append(f"{Path(rel).name}: {e}")
+            _hdd_errors.add(hdd)
+
+    for hdd, m in manifests.items():
+        _save_manifest(hdd, m)
+
+    date_str = _date_range(all_dates)
+    hdd_line = "  ".join(f"{h}: {n}장" for h, n in sorted(p1_copied.items())) or "없음"
+    p1_body = (f"{date_str}\n" if date_str else "") + hdd_line
+    if p1_dup:
+        p1_body += f"\n중복 및 스킵 {p1_dup}건"
+    if p1_errors:
+        p1_body += f"\n오류 {len(p1_errors)}건"
+    print(f"\n[JPG 1차 저장] {hdd_line}" + (f"  ({date_str})" if date_str else ""))
+    notify("📸 JPG 1차 저장 완료" if multi_jobs else "📸 JPG 저장 완료", p1_body, tags=["frame_with_picture"])
+
+    for src, rel, hdd_list in single_jobs:
+        hdd = hdd_list[0]
+        dst_rel = _jpg_dst_rel(hdd, rel)
+        if os.path.isfile(os.path.join(hdd, dst_rel)) and os.path.isfile(src):
+            os.remove(src)
+            try:
+                os.remove(src + ".sha256")
+            except OSError:
+                pass
+
+    if not multi_jobs:
+        _remove_empty_dirs(JPG_SORTED_DIR)
+        for hdd, m in manifests.items():
+            if _prune_manifest(hdd, m):
+                _save_manifest(hdd, m)
+        return
+
+    # ── Pass 2: 두 번째 HDD 복사 + 원본 대비 교차 검증 ────────────────────────
+    p2_dup = 0
+    verify_errors: list[str] = []
+    _unsafe_rels: set[str] = set()
+
+    for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="JPG 2차 저장 및 검증", disable=not sys.stdout.isatty()):
+        for hdd in hdd_list[1:]:
+            if not os.path.isdir(hdd):
+                verify_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
+                _unsafe_rels.add(rel)
+                continue
+            if hdd not in manifests:
+                manifests[hdd] = _load_manifest(hdd)
+            try:
+                dst_rel = _jpg_dst_rel(hdd, rel)
+                is_dup = _copy_to_hdd(src, hdd, dst_rel, manifests[hdd], known_hash=sidecar_hashes[rel])
+                if is_dup:
+                    p2_dup += 1
+            except Exception as e:
+                verify_errors.append(f"{Path(rel).name}: {e}")
+                _unsafe_rels.add(rel)
+                _hdd_errors.add(hdd)
+
+        if os.path.isfile(src):
+            src_hash = sidecar_hashes[rel] or _sha256(src)
+            for hdd in hdd_list:
+                dst = os.path.join(hdd, _jpg_dst_rel(hdd, rel))
+                if not os.path.isfile(dst):
+                    _unsafe_rels.add(rel)
+                    if os.path.isdir(hdd):
+                        _hdd_errors.add(hdd)
+                elif _sha256(dst) != src_hash:
+                    verify_errors.append(
+                        f"교차검증 실패: {Path(rel).name} ({os.path.basename(hdd)})"
+                    )
+                    _unsafe_rels.add(rel)
+                    _hdd_errors.add(hdd)
+
+    for hdd, m in manifests.items():
+        _save_manifest(hdd, m)
+
+    backup_count = 0
+    for src, rel, hdd_list in multi_jobs:
+        if rel in _unsafe_rels:
+            continue
+        all_present = all(
+            os.path.isfile(os.path.join(hdd, _jpg_dst_rel(hdd, rel))) for hdd in hdd_list
+        )
+        if all_present and os.path.isfile(src):
+            os.remove(src)
+            try:
+                os.remove(src + ".sha256")
+            except OSError:
+                pass
+            backup_count += 1
+
+    _remove_empty_dirs(JPG_SORTED_DIR)
+
+    for hdd, m in manifests.items():
+        if _prune_manifest(hdd, m):
+            _save_manifest(hdd, m)
+
+    all_hdds = sorted({hdd for _, _, hl in multi_jobs for hdd in hl})
+    hdd_checks = "  ".join(
+        f"{os.path.basename(h)} ✓" if os.path.isdir(h) else f"{os.path.basename(h)} 미연결"
+        for h in all_hdds
+    )
+    backup_body = (f"{date_str}\n" if date_str else "") + f"{hdd_checks}\n총 {backup_count}장 JPG 백업 완료"
+    if p2_dup:
+        backup_body += f"  ·  중복 및 스킵 {p2_dup}건"
+    if verify_errors:
+        preview = "\n".join(verify_errors[:5])
+        if len(verify_errors) > 5:
+            preview += f"\n... 외 {len(verify_errors) - 5}건"
+        backup_body += f"\n오류 {len(verify_errors)}건\n{preview}"
+
+    _free_lines = "\n".join(
+        f"{os.path.basename(h)}: {shutil.disk_usage(h).free / 1024**3:.1f} GB 남음"
+        for h in sorted(manifests) if os.path.isdir(h)
+    )
+    if _free_lines:
+        backup_body += "\n" + _free_lines
+
+    has_errors = bool(verify_errors)
+    print(f"\n[JPG 백업 완료] {hdd_checks} | {backup_count}장")
+    if verify_errors:
+        for e in verify_errors[:3]:
+            print(f"  [검증 오류] {e}")
+    notify(
+        "⚠️ JPG 백업 오류" if has_errors else "✅ JPG 백업 완료",
+        backup_body,
+        priority="high" if has_errors else "default",
+        tags=["warning" if has_errors else "white_check_mark"],
+    )
 
 
 def distribute_videos():
