@@ -18,31 +18,17 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from config import (
-    CAMERA_HDD_MAP, CAMERA_PREFIX_MAP,
     DESKTOP_DROP_DIR, INBOX_DIR,
-    MOUNT_SETTLE_DELAY, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS,
-    VIDEO_SSD_LIST, WATCH_DIRS,
+    MOUNT_SETTLE_DELAY, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS, WATCH_DIRS,
 )
 from notifier import notify
 
 
-# config에 등록된 모든 HDD/SSD 마운트 경로 — 이 경로는 카드로 취급하지 않음
-_KNOWN_HDDS: frozenset[str] = frozenset(
-    {h for lst in CAMERA_HDD_MAP.values() for h in lst}
-    | {h for _, lst in CAMERA_PREFIX_MAP for h in lst}
-    | set(VIDEO_SSD_LIST)
-)
-
-
 def _is_camera_card(mount_point: str) -> bool:
     """
-    카메라 메모리 카드 여부 확인.
-    1. config 등록 HDD/SSD 경로 → False
-    2. udev가 HDD 또는 SSD로 판정 → False
-    3. 그 외 → True (SD/CF/XQD 카드로 간주)
+    USB 이동식 장치(TRAN=usb, RM=1)만 카메라 카드로 허용.
+    내장 SATA/NVMe, USB 외장하드(RM=0) 모두 차단.
     """
-    if mount_point in _KNOWN_HDDS:
-        return False
     try:
         r = subprocess.run(
             ["findmnt", "-n", "-o", "SOURCE", mount_point],
@@ -53,17 +39,16 @@ def _is_camera_card(mount_point: str) -> bool:
             return False
         parent = device.rstrip("0123456789")
         r = subprocess.run(
-            ["udevadm", "info", "--query=property", f"--name={parent}"],
+            ["lsblk", "-n", "-d", "-o", "TRAN,RM", parent],
             capture_output=True, text=True, timeout=5,
         )
-        props = dict(
-            line.split("=", 1) for line in r.stdout.splitlines() if "=" in line
-        )
-        if props.get("ID_DRIVE_HDD") == "1" or props.get("ID_DRIVE_SSD") == "1":
+        parts = r.stdout.split()
+        if len(parts) < 2:
             return False
+        tran, rm = parts[0].lower(), parts[1].strip()
+        return tran == "usb" and rm == "1"
     except Exception:
-        pass
-    return True
+        return False
 
 
 def _sha256(filepath: str) -> str:
