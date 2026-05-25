@@ -4,8 +4,9 @@
 
 실행:  python main.py
 
-상시:  SD/CF 카드 감지 → inbox 복사 → sorted 분류 (ntfy 알림)
-새벽 4시: sorted → HDD 배포 (ntfy 알림)
+상시:  SD/CF 카드 감지 → inbox 복사 (ntfy 알림)
+새벽 1시: inbox → sorted 분류 (ntfy 알림)
+새벽 6시: sorted → HDD 배포 (ntfy 알림)
 매주 일요일 새벽 3시: HDD 무결성 검사 (ntfy 알림)
 """
 import json
@@ -17,10 +18,11 @@ from datetime import datetime
 import schedule
 
 from config import (
-    CHECK_AT, CHECK_WEEKDAY, DISTRIBUTE_AT,
+    CHECK_AT, CHECK_WEEKDAY, DISTRIBUTE_AT, SORT_AT,
     INBOX_DIR, JPG_SORTED_DIR, SORTED_DIR, STATE_FILE, VIDEO_SORTED_DIR,
 )
 from importer import start_watcher
+from sorter import sort_inbox
 from distributor import distribute, distribute_jpgs, distribute_videos
 from checker import run_integrity_check
 from notifier import notify
@@ -57,6 +59,14 @@ def _save_state(state: dict):
 
 
 # ── 스케줄 job 래퍼 (예외 격리 + 상태 기록) ─────────────────────────────────────
+
+def _wrapped_sort():
+    try:
+        sort_inbox()
+    except Exception as e:
+        print(f"[분류 오류] {e}")
+        notify("⚠️ 분류 오류", str(e), priority="high", tags=["warning"])
+
 
 def _wrapped_distribute():
     # JPG 먼저 배포 (드라이브 언마운트 없음 — distribute()가 이후에 담당)
@@ -127,10 +137,12 @@ def main():
     _catch_up_missed_jobs()
 
     # ── 스케줄 등록 ─────────────────────────────────────────────────────────────
+    schedule.every().day.at(SORT_AT).do(_wrapped_sort)
     schedule.every().day.at(DISTRIBUTE_AT).do(_wrapped_distribute)
     getattr(schedule.every(), CHECK_WEEKDAY).at(CHECK_AT).do(_wrapped_integrity_check)
 
     print(f"\n파이프라인 시작")
+    print(f"  {SORT_AT} 매일: sorted 분류")
     print(f"  {DISTRIBUTE_AT} 매일: HDD 배포")
     print(f"  {CHECK_AT} 매주 {CHECK_WEEKDAY}: 무결성 검사")
     print(f"  inbox  → {INBOX_DIR}")

@@ -17,6 +17,7 @@ import tqdm
 from config import (
     CAMERA_HDD_MAP, CAMERA_PREFIX_MAP,
     CAMERA_JPG_HDD_MAP, CAMERA_JPG_PREFIX_MAP, JPG_PREFIX_HDDS,
+    CAMERA_JPG_FOLDER_OVERRIDES,
     JPG_EXTENSIONS, JPG_SORTED_DIR,
     MANIFEST_FILENAME,
     SORTED_DIR, SORTED_WARN_FREE_GB, SUPPORTED_EXTENSIONS,
@@ -159,7 +160,10 @@ def _get_hdds_for_jpg_camera(camera: str) -> list[str] | None:
 
 
 def _jpg_dst_rel(hdd: str, rel: str) -> str:
-    """NIKON 드라이브는 JPG/ 하위에 저장, 나머지는 루트에 저장."""
+    """NIKON 드라이브는 JPG/ 하위에 저장, 나머지는 루트에 저장. 폴더명 오버라이드 적용."""
+    parts = Path(rel).parts
+    if parts and parts[0] in CAMERA_JPG_FOLDER_OVERRIDES:
+        rel = os.path.join(CAMERA_JPG_FOLDER_OVERRIDES[parts[0]], *parts[1:])
     return os.path.join("JPG", rel) if hdd in JPG_PREFIX_HDDS else rel
 
 

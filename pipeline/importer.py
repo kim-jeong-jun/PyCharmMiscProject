@@ -57,6 +57,35 @@ def _is_camera_card(mount_point: str) -> bool:
         return False
 
 
+def _unmount_card(mount_point: str) -> bool:
+    """SD카드 안전 언마운트 + USB 전원 차단. 성공 시 True 반환."""
+    try:
+        r = subprocess.run(
+            ["findmnt", "-n", "-o", "SOURCE", mount_point],
+            capture_output=True, text=True, timeout=5,
+        )
+        device = r.stdout.strip()
+        if not device:
+            return False
+        r = subprocess.run(
+            ["udisksctl", "unmount", "-b", device, "--no-user-interaction"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            print(f"  [언마운트 실패] {r.stderr.strip()}")
+            return False
+        parent = re.sub(r'p\d+$', '', device) if re.search(r'p\d+$', device) else device.rstrip("0123456789")
+        subprocess.run(
+            ["udisksctl", "power-off", "-b", parent, "--no-user-interaction"],
+            capture_output=True, timeout=10,
+        )
+        print(f"  [안전 제거] {os.path.basename(mount_point)} ({device})")
+        return True
+    except Exception as e:
+        print(f"  [언마운트 오류] {e}")
+        return False
+
+
 def _sha256(filepath: str) -> str:
     h = hashlib.sha256()
     with open(filepath, 'rb') as f:
@@ -64,22 +93,6 @@ def _sha256(filepath: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-
-# ── 드롭 폴더 sort debounce ────────────────────────────────────────────────────
-_sort_timer: threading.Timer | None = None
-_sort_lock = threading.Lock()
-
-
-def _schedule_sort(delay: float = 3.0):
-    """마지막 파일 투입 후 delay초 뒤에 sort_inbox()를 한 번만 실행."""
-    global _sort_timer
-    with _sort_lock:
-        if _sort_timer is not None:
-            _sort_timer.cancel()
-        from sorter import sort_inbox
-        _sort_timer = threading.Timer(delay, sort_inbox)
-        _sort_timer.daemon = True
-        _sort_timer.start()
 
 
 def copy_card_to_inbox(mount_point: str) -> int:
@@ -116,11 +129,19 @@ def copy_card_to_inbox(mount_point: str) -> int:
         copied += 1
 
     print(f"  [가져오기] {copied}개 → {dest_root}")
-    notify(
-        "📥 카드 가져오기 완료",
-        f"{card_name} — {copied}장 inbox 보관",
-        tags=["inbox_tray"],
-    )
+    ok = _unmount_card(mount_point)
+    if ok:
+        notify(
+            "📥 카드 가져오기 완료",
+            f"{card_name} — {copied}장",
+            tags=["inbox_tray"],
+        )
+    else:
+        notify(
+            "📥 카드 가져오기 완료",
+            f"{card_name} — {copied}장\n⚠️ 언마운트 실패, 수동으로 뽑아주세요",
+            tags=["inbox_tray", "warning"],
+        )
     return copied
 
 
@@ -128,18 +149,32 @@ class _MountWatcher(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
             return
+        time.sleep(MOUNT_SETTLE_DELAY)
         if not _is_camera_card(event.src_path):
             print(f"[무시] 카메라 카드 아님 (HDD/SSD): {event.src_path}")
             return
         print(f"\n[카드 감지] {event.src_path}")
-        time.sleep(MOUNT_SETTLE_DELAY)
+        self._import(event.src_path)
+
+    def _import(self, mount_point: str, attempt: int = 1):
         try:
-            n = copy_card_to_inbox(event.src_path)
-            if n > 0:
-                _schedule_sort(delay=1.0)  # 타이머 경유 → lock 충돌 시 자동 재시도 가능
+            copy_card_to_inbox(mount_point)
+        except OSError as e:
+            card_name = os.path.basename(mount_point)
+            if attempt == 1:
+                print(f"[오류] I/O 에러 — 60초 후 재시도: {e}")
+                notify("⚠️ 카드 읽기 오류 — 1분 후 재시도",
+                       f"{card_name}\n{e}", priority="high", tags=["warning"])
+                t = threading.Timer(60.0, self._import, args=(mount_point,), kwargs={"attempt": 2})
+                t.daemon = True
+                t.start()
+            else:
+                print(f"[오류] 재시도 실패: {e}")
+                notify("⚠️ 카드 가져오기 실패 (재시도 후)",
+                       f"{card_name}\n{e}", priority="high", tags=["warning"])
         except Exception as e:
             print(f"[오류] 카드 처리 중 예외 발생: {e}")
-            notify("⚠️ 카드 가져오기 실패", f"{os.path.basename(event.src_path)}\n{e}",
+            notify("⚠️ 카드 가져오기 실패", f"{os.path.basename(mount_point)}\n{e}",
                    priority="high", tags=["warning"])
 
 
@@ -204,15 +239,8 @@ class _DropFolderWatcher(FileSystemEventHandler):
                 return
             filename = os.path.basename(path)
             dest = os.path.join(INBOX_DIR, filename)
-            if os.path.exists(dest):
-                stem, ext = os.path.splitext(filename)
-                i = 1
-                while os.path.exists(dest):
-                    dest = os.path.join(INBOX_DIR, f"{stem}_{i}{ext}")
-                    i += 1
             shutil.move(path, dest)
             print(f"[드롭폴더] {filename} → inbox")
-            _schedule_sort()
         except Exception as e:
             print(f"[오류] 드롭폴더 처리 실패: {e}")
         finally:
