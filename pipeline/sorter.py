@@ -72,6 +72,29 @@ def _get_video_dest_dir(filepath: str) -> str:
     return os.path.join(VIDEO_SORTED_DIR, camera)
 
 
+def _exiftool_camera_and_date(filepath: str) -> tuple[str, str]:
+    """exiftool로 카메라명과 촬영 날짜 반환. 실패 시 ('Misc', '0000:00:00 00:00:00')."""
+    try:
+        r = subprocess.run(
+            ["exiftool", "-Make", "-Model", "-DateTimeOriginal", "-j", filepath],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return "Misc", "0000:00:00 00:00:00"
+        data = json.loads(r.stdout)[0]
+        make  = str(data.get("Make",  "")).strip()
+        model = str(data.get("Model", "")).strip() or "Misc"
+        if make:
+            brand = make.split()[0]
+            if brand.upper() not in model.upper():
+                model = f"{brand} {model}"
+        camera = CAMERA_NAME_OVERRIDES.get(model, model) or "Misc"
+        date = str(data.get("DateTimeOriginal", "0000:00:00 00:00:00"))
+        return camera, date
+    except Exception:
+        return "Misc", "0000:00:00 00:00:00"
+
+
 def _get_dest_dir(filepath: str, base_dir: str = SORTED_DIR) -> str:
     """EXIF 기반으로 base_dir 내 목적지 디렉터리 반환."""
     with open(filepath, 'rb') as f:
@@ -80,6 +103,14 @@ def _get_dest_dir(filepath: str, base_dir: str = SORTED_DIR) -> str:
 
     camera = _normalize_camera(tag)
     shoot_time = str(tag.get("EXIF DateTimeOriginal", "0000:00:00 00:00:00"))
+
+    # exifread가 카메라명 또는 날짜를 읽지 못한 경우 exiftool로 재시도
+    if camera == "Misc" or shoot_time.startswith("0000"):
+        camera_et, date_et = _exiftool_camera_and_date(filepath)
+        if camera == "Misc" and camera_et != "Misc":
+            camera = camera_et
+        if shoot_time.startswith("0000") and not date_et.startswith("0000"):
+            shoot_time = date_et
 
     try:
         y, m, d = shoot_time.split(" ")[0].split(":")
