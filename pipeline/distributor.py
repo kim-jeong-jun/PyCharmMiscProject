@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import tqdm
@@ -23,6 +24,12 @@ from config import (
     VIDEO_EXTENSIONS, VIDEO_SORTED_DIR, VIDEO_SSD_LIST,
 )
 from notifier import notify
+
+
+def _is_recent(src_paths: list[str]) -> bool:
+    """파일 중 하나라도 어제 0시 이후 mtime이면 True (당일·전일 sort 감지)."""
+    cutoff = datetime.combine(date.today() - timedelta(days=1), datetime.min.time()).timestamp()
+    return any(os.path.getmtime(p) >= cutoff for p in src_paths if os.path.isfile(p))
 
 
 def _sha256(filepath: str) -> str:
@@ -323,6 +330,11 @@ def distribute():
         _do_unmount(manifests, _hdd_errors)
         return
 
+    if not has_errors and not _is_recent([src for src, _, _, _ in jobs]):
+        print(f"\n[배포 완료] {saved_count}장 (구형 파일, 알림 생략)")
+        _do_unmount(manifests, _hdd_errors)
+        return
+
     all_hdds = sorted({hdd for _, _, _, hl in jobs for hdd in hl if os.path.isdir(hdd)})
     title = "⚠️ 배포 오류" if has_errors else "✅ 백업 완료"
     priority = "high" if has_errors else "default"
@@ -471,7 +483,7 @@ def distribute_jpgs():
     date_str = _date_range(all_dates)
     hdd_line = "  ".join(f"{h}: {n}장" for h, n in sorted(p1_copied.items())) or "없음"
     print(f"\n[JPG 1차 저장] {hdd_line}" + (f"  ({date_str})" if date_str else ""))
-    if p1_copied or p1_errors:
+    if (p1_copied or p1_errors) and (p1_errors or _is_recent([src for src, _, _ in jobs])):
         p1_body = (f"{date_str}\n" if date_str else "") + hdd_line
         if p1_dup:
             p1_body += f"\n중복 및 스킵 {p1_dup}건"
@@ -579,6 +591,10 @@ def distribute_jpgs():
 
     # 실제 저장·오류 없으면 알림 생략 (미연결·중복 포함)
     if not verify_errors and backup_count == 0:
+        return
+
+    if not verify_errors and not _is_recent([src for src, _, _ in multi_jobs]):
+        print(f"\n[JPG 백업 완료] {backup_count}장 (구형 파일, 알림 생략)")
         return
 
     has_errors = bool(verify_errors)
@@ -744,6 +760,10 @@ def distribute_videos():
 
     # SSD 미연결만 있고 실제 I/O 오류·저장 없으면 알림 생략
     if not errors and saved == 0:
+        return
+
+    if not errors and not _is_recent(candidates):
+        print(f"\n[영상 배포] {saved}개 (구형 파일, 알림 생략)")
         return
 
     has_errors = bool(errors)
