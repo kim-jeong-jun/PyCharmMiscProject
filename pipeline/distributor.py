@@ -16,7 +16,7 @@ import tqdm
 from config import (
     CAMERA_HDD_MAP, CAMERA_PREFIX_MAP,
     CAMERA_JPG_HDD_MAP, CAMERA_JPG_PREFIX_MAP, JPG_PREFIX_HDDS,
-    CAMERA_JPG_FOLDER_OVERRIDES,
+    CAMERA_JPG_FOLDER_OVERRIDES, CAMERA_HDD_SUBDIR,
     JPG_EXTENSIONS, JPG_SORTED_DIR,
     MANIFEST_FILENAME,
     SORTED_DIR, SORTED_WARN_FREE_GB, SUPPORTED_EXTENSIONS,
@@ -156,10 +156,12 @@ def _get_hdds_for_jpg_camera(camera: str) -> list[str] | None:
 
 
 def _jpg_dst_rel(hdd: str, rel: str) -> str:
-    """NIKON 드라이브는 JPG/ 하위에 저장, 나머지는 루트에 저장. 폴더명 오버라이드 적용."""
+    """NIKON 드라이브는 JPG/ 하위에 저장, 나머지는 루트에 저장. 폴더명/경로 오버라이드 적용."""
     parts = Path(rel).parts
     if parts and parts[0] in CAMERA_JPG_FOLDER_OVERRIDES:
         rel = os.path.join(CAMERA_JPG_FOLDER_OVERRIDES[parts[0]], *parts[1:])
+    elif parts and parts[0] in CAMERA_HDD_SUBDIR:
+        rel = os.path.join(CAMERA_HDD_SUBDIR[parts[0]], *parts[1:])
     return os.path.join("JPG", rel) if hdd in JPG_PREFIX_HDDS else rel
 
 
@@ -200,7 +202,7 @@ def distribute():
         return
 
     # ── Job 목록 ───────────────────────────────────────────────────────────────
-    jobs: list[tuple[str, str, list[str]]] = []  # (src, rel, hdd_list)
+    jobs: list[tuple[str, str, str, list[str]]] = []  # (src, nvme_rel, hdd_rel, hdd_list)
     skipped_cameras: set[str] = set()
     all_dates: set[str] = set()  # rel 경로의 YYYY-MM-DD 폴더명
 
@@ -213,7 +215,8 @@ def distribute():
             all_dates.add(parts[2])  # Camera/Year/YYYY-MM-DD/file
         hdd_list = _get_hdds_for_camera(camera)
         if hdd_list:
-            jobs.append((src, rel, hdd_list))
+            hdd_rel = os.path.join(CAMERA_HDD_SUBDIR[camera], *parts[1:]) if camera in CAMERA_HDD_SUBDIR else rel
+            jobs.append((src, rel, hdd_rel, hdd_list))
         else:
             skipped_cameras.add(camera)
 
@@ -225,13 +228,13 @@ def distribute():
 
     # ── 용량 사전 확인 ─────────────────────────────────────────────────────
     _need_map: dict[str, int] = {}
-    for src, rel, hdd_list in jobs:
+    for src, rel, hdd_rel, hdd_list in jobs:
         try:
             sz = os.path.getsize(src)
         except OSError:
             continue
         for hdd in hdd_list:
-            if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, rel)):
+            if os.path.isdir(hdd) and not os.path.isfile(os.path.join(hdd, hdd_rel)):
                 _need_map[hdd] = _need_map.get(hdd, 0) + sz
     _insufficient: list[str] = []
     _skip_hdds: set[str] = set()
@@ -245,46 +248,48 @@ def distribute():
             _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB < 필요 {need:.1f} GB — 배포 건너뜀")
             _skip_hdds.add(hdd)
     if _insufficient:
-        notify("⚠️ HDD 용량 부족 — 배포 중단", "\n".join(_insufficient), priority="high", tags=["warning"])
+        for msg in _insufficient:
+            print(f"  [용량 부족 — 건너뜀] {msg}")
 
     manifests: dict[str, dict] = {}
     _hdd_errors: set[str] = set()
     _unsafe_rels: set[str] = set()
 
     # 사이드카 해시 선독
-    sidecar_hashes: dict[str, str | None] = {rel: _read_sidecar(src) for src, rel, _ in jobs}
+    sidecar_hashes: dict[str, str | None] = {rel: _read_sidecar(src) for src, rel, _, _ in jobs}
 
     # ── 단일 패스: 파일마다 NVMe에서 모든 HDD에 직접 쓰기 ────────────────────────
     copied: dict[str, int] = {}
     dup_count = 0
     errors: list[str] = []
+    missing_hdds: set[str] = set()  # 미연결 HDD — 알림 없이 조용히 건너뜀
     saved_count = 0
 
-    for src, rel, hdd_list in tqdm.tqdm(jobs, desc="HDD 배포", disable=not sys.stdout.isatty()):
+    for src, rel, hdd_rel, hdd_list in tqdm.tqdm(jobs, desc="HDD 배포", disable=not sys.stdout.isatty()):
         for hdd in hdd_list:
             if hdd in _skip_hdds:
                 _unsafe_rels.add(rel)
                 continue
             if not os.path.isdir(hdd):
-                errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
+                missing_hdds.add(os.path.basename(hdd))
                 _unsafe_rels.add(rel)
                 continue
             if hdd not in manifests:
                 manifests[hdd] = _load_manifest(hdd)
             try:
-                is_dup = _copy_to_hdd(src, hdd, rel, manifests[hdd], known_hash=sidecar_hashes[rel])
+                is_dup = _copy_to_hdd(src, hdd, hdd_rel, manifests[hdd], known_hash=sidecar_hashes[rel])
                 if is_dup:
                     dup_count += 1
                 else:
                     copied[os.path.basename(hdd)] = copied.get(os.path.basename(hdd), 0) + 1
             except Exception as e:
-                errors.append(f"{Path(rel).name}: {e}")
+                errors.append(f"{Path(hdd_rel).name}: {e}")
                 _unsafe_rels.add(rel)
                 _hdd_errors.add(hdd)
 
         # 모든 HDD에 검증 완료된 파일만 즉시 소스 삭제
         if rel not in _unsafe_rels:
-            all_present = all(os.path.isfile(os.path.join(hdd, rel)) for hdd in hdd_list)
+            all_present = all(os.path.isfile(os.path.join(hdd, hdd_rel)) for hdd in hdd_list)
             if all_present and os.path.isfile(src):
                 os.remove(src)
                 try:
@@ -308,10 +313,17 @@ def distribute():
     if pruned_total:
         print(f"[배포] manifest 고아 항목 {pruned_total}개 정리됨")
 
-    # 완료 알림
+    # 완료 알림 — 실제 I/O 오류가 없고 저장된 것도 없으면 알림 생략
     date_str = _date_range(all_dates)
-    all_hdds = sorted({hdd for _, _, hl in jobs for hdd in hl})
     has_errors = bool(errors)
+
+    if not has_errors and saved_count == 0:
+        if missing_hdds:
+            print(f"\n[배포] 대기 중 (미연결: {', '.join(sorted(missing_hdds))})")
+        _do_unmount(manifests, _hdd_errors)
+        return
+
+    all_hdds = sorted({hdd for _, _, _, hl in jobs for hdd in hl if os.path.isdir(hdd)})
     title = "⚠️ 배포 오류" if has_errors else "✅ 백업 완료"
     priority = "high" if has_errors else "default"
     tag = "warning" if has_errors else "white_check_mark"
@@ -320,7 +332,9 @@ def distribute():
     if date_str:
         lines.append(date_str)
     for h in all_hdds:
-        lines.append(f"{os.path.basename(h)} {'✓' if os.path.isdir(h) else '미연결'}")
+        lines.append(f"{os.path.basename(h)} ✓")
+    if missing_hdds:
+        lines.append(f"미연결 (건너뜀): {', '.join(sorted(missing_hdds))}")
     lines.append(f"총 {saved_count}장 백업 완료")
     if dup_count:
         lines.append(f"중복 스킵: {dup_count}건")
@@ -416,7 +430,8 @@ def distribute_jpgs():
             _insufficient.append(f"{os.path.basename(hdd)}: 여유 {free:.1f} GB < 필요 {need:.1f} GB — 배포 건너뜀")
             _skip_hdds.add(hdd)
     if _insufficient:
-        notify("⚠️ HDD 용량 부족 — JPG 배포 중단", "\n".join(_insufficient), priority="high", tags=["warning"])
+        for msg in _insufficient:
+            print(f"  [JPG 용량 부족 — 건너뜀] {msg}")
 
     manifests: dict[str, dict] = {}
     multi_jobs = [(s, r, hl) for s, r, hl in jobs if len(hl) > 1]
@@ -433,10 +448,8 @@ def distribute_jpgs():
     for src, rel, hdd_list in tqdm.tqdm(jobs, desc="JPG 1차 저장", disable=not sys.stdout.isatty()):
         hdd = hdd_list[0]
         if hdd in _skip_hdds:
-            p1_errors.append(f"용량 부족 스킵: {os.path.basename(hdd)}")
             continue
         if not os.path.isdir(hdd):
-            p1_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
             continue
         if hdd not in manifests:
             manifests[hdd] = _load_manifest(hdd)
@@ -457,13 +470,14 @@ def distribute_jpgs():
 
     date_str = _date_range(all_dates)
     hdd_line = "  ".join(f"{h}: {n}장" for h, n in sorted(p1_copied.items())) or "없음"
-    p1_body = (f"{date_str}\n" if date_str else "") + hdd_line
-    if p1_dup:
-        p1_body += f"\n중복 및 스킵 {p1_dup}건"
-    if p1_errors:
-        p1_body += f"\n오류 {len(p1_errors)}건"
     print(f"\n[JPG 1차 저장] {hdd_line}" + (f"  ({date_str})" if date_str else ""))
-    notify("📸 JPG 1차 저장 완료" if multi_jobs else "📸 JPG 저장 완료", p1_body, tags=["frame_with_picture"])
+    if p1_copied or p1_errors:
+        p1_body = (f"{date_str}\n" if date_str else "") + hdd_line
+        if p1_dup:
+            p1_body += f"\n중복 및 스킵 {p1_dup}건"
+        if p1_errors:
+            p1_body += f"\n오류 {len(p1_errors)}건"
+        notify("📸 JPG 1차 저장 완료" if multi_jobs else "📸 JPG 저장 완료", p1_body, tags=["frame_with_picture"])
 
     for src, rel, hdd_list in single_jobs:
         hdd = hdd_list[0]
@@ -486,6 +500,7 @@ def distribute_jpgs():
     p2_dup = 0
     verify_errors: list[str] = []
     _unsafe_rels: set[str] = set()
+    _p2_missing: set[str] = set()  # 미연결 HDD — 알림 없이 조용히 건너뜀
 
     for src, rel, hdd_list in tqdm.tqdm(multi_jobs, desc="JPG 2차 저장 및 검증", disable=not sys.stdout.isatty()):
         for hdd in hdd_list[1:]:
@@ -493,7 +508,7 @@ def distribute_jpgs():
                 _unsafe_rels.add(rel)
                 continue
             if not os.path.isdir(hdd):
-                verify_errors.append(f"HDD 미연결: {os.path.basename(hdd)}")
+                _p2_missing.add(os.path.basename(hdd))
                 _unsafe_rels.add(rel)
                 continue
             if hdd not in manifests:
@@ -514,11 +529,14 @@ def distribute_jpgs():
                 if hdd in _skip_hdds:
                     _unsafe_rels.add(rel)
                     continue
+                if not os.path.isdir(hdd):
+                    _p2_missing.add(os.path.basename(hdd))
+                    _unsafe_rels.add(rel)
+                    continue
                 dst = os.path.join(hdd, _jpg_dst_rel(hdd, rel))
                 if not os.path.isfile(dst):
                     _unsafe_rels.add(rel)
-                    if os.path.isdir(hdd):
-                        _hdd_errors.add(hdd)
+                    _hdd_errors.add(hdd)
                 elif _sha256(dst) != src_hash:
                     verify_errors.append(
                         f"교차검증 실패: {Path(rel).name} ({os.path.basename(hdd)})"
@@ -555,14 +573,27 @@ def distribute_jpgs():
         f"{os.path.basename(h)} ✓" if os.path.isdir(h) else f"{os.path.basename(h)} 미연결"
         for h in all_hdds
     )
+    print(f"\n[JPG 백업 완료] {hdd_checks} | {backup_count}장")
+    if _p2_missing:
+        print(f"  [JPG 배포] 대기 중 (미연결: {', '.join(sorted(_p2_missing))})")
+
+    # 실제 저장·오류 없으면 알림 생략 (미연결·중복 포함)
+    if not verify_errors and backup_count == 0:
+        return
+
+    has_errors = bool(verify_errors)
     backup_body = (f"{date_str}\n" if date_str else "") + f"{hdd_checks}\n총 {backup_count}장 JPG 백업 완료"
     if p2_dup:
         backup_body += f"  ·  중복 및 스킵 {p2_dup}건"
+    if _p2_missing:
+        backup_body += f"\n미연결 (건너뜀): {', '.join(sorted(_p2_missing))}"
     if verify_errors:
         preview = "\n".join(verify_errors[:5])
         if len(verify_errors) > 5:
             preview += f"\n... 외 {len(verify_errors) - 5}건"
         backup_body += f"\n오류 {len(verify_errors)}건\n{preview}"
+        for e in verify_errors[:3]:
+            print(f"  [검증 오류] {e}")
 
     _free_lines = "\n".join(
         f"{os.path.basename(h)}: {shutil.disk_usage(h).free / 1024**3:.1f} GB 남음"
@@ -571,11 +602,6 @@ def distribute_jpgs():
     if _free_lines:
         backup_body += "\n" + _free_lines
 
-    has_errors = bool(verify_errors)
-    print(f"\n[JPG 백업 완료] {hdd_checks} | {backup_count}장")
-    if verify_errors:
-        for e in verify_errors[:3]:
-            print(f"  [검증 오류] {e}")
     notify(
         "⚠️ JPG 백업 오류" if has_errors else "✅ JPG 백업 완료",
         backup_body,
@@ -630,7 +656,7 @@ def distribute_videos():
 
     manifests: dict[str, dict] = {}
     _ssd_errors: set[str] = set()
-    _ssd_missing: set[str] = set()
+    _ssd_missing: set[str] = set()  # 미연결 SSD — 알림 없이 조용히 건너뜀
     errors: list[str] = []
     unsafe_rels: set[str] = set()
     all_cameras: set[str] = set()
@@ -657,9 +683,7 @@ def distribute_videos():
                 unsafe_rels.add(rel)
                 continue
             if not os.path.isdir(ssd):
-                if ssd not in _ssd_missing:
-                    errors.append(f"SSD 미연결: {os.path.basename(ssd)}")
-                    _ssd_missing.add(ssd)
+                _ssd_missing.add(os.path.basename(ssd))
                 unsafe_rels.add(rel)
                 continue
             if ssd not in manifests:
@@ -714,12 +738,21 @@ def distribute_videos():
             _save_manifest(ssd, m)
 
     cam_str = ", ".join(sorted(all_cameras)) if all_cameras else ""
+    print(f"\n[영상 배포] {saved}개" + (f"  ({cam_str})" if cam_str else ""))
+    if _ssd_missing:
+        print(f"  [영상 배포] 대기 중 (미연결: {', '.join(sorted(_ssd_missing))})")
+
+    # SSD 미연결만 있고 실제 I/O 오류·저장 없으면 알림 생략
+    if not errors and saved == 0:
+        return
+
+    has_errors = bool(errors)
     body = (f"{cam_str}\n" if cam_str else "") + f"총 {saved}개 저장 완료"
+    if _ssd_missing:
+        body += f"\n미연결 (건너뜀): {', '.join(sorted(_ssd_missing))}"
     if errors:
         preview = "\n".join(errors[:5])
         body += f"\n오류 {len(errors)}건\n{preview}"
-    has_errors = bool(errors)
-    print(f"\n[영상 배포] {saved}개" + (f"  ({cam_str})" if cam_str else ""))
     notify(
         "⚠️ 영상 배포 오류" if has_errors else "🎬 영상 배포 완료",
         body,

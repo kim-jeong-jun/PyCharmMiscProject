@@ -52,6 +52,8 @@ CAMERA_HDD_MAP: dict[str, list[str]] = {
     "LEICA M10-R":      ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "M8 Digital Camera":["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "LEICA X2":         ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    # ── Canon ────────────────────────────────────────────────────────────────
+    "Canon EOS R8": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
     # ── Fujifilm (override로 brand prefix 제거된 모델은 명시적으로 등록) ──────
     "X-T5":   ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
     "GFX-50": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
@@ -79,6 +81,7 @@ CAMERA_JPG_HDD_MAP: dict[str, list[str]] = {
     "LEICA M10-R":      ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "M8 Digital Camera":["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
     "LEICA X2":         ["/media/jjkim/LEICA_0", "/media/jjkim/LEICA_1"],
+    "Canon EOS R8": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
     "X-T5":   ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
     "GFX-50": ["/media/jjkim/SSD_0", "/media/jjkim/SSD_1"],
 }
@@ -100,6 +103,16 @@ JPG_PREFIX_HDDS: frozenset[str] = frozenset({
 # 키: jpg_sorted/ 내 카메라 폴더명, 값: HDD에 실제로 쓸 폴더명
 CAMERA_JPG_FOLDER_OVERRIDES: dict[str, str] = {
     "NIKON D500": "D500",  # SSD_2/3에 D500/으로 저장
+}
+
+# SSD 브랜드 하위 폴더 오버라이드: sorted/ 카메라 폴더명 → SSD 내 실제 저장 경로
+# 기본 동작: SSD/{카메라명}/Year/Date/  →  오버라이드: SSD/{아래값}/Year/Date/
+# RAW(distribute)와 JPG(distribute_jpgs) 모두 적용됨
+CAMERA_HDD_SUBDIR: dict[str, str] = {
+    "Canon EOS R8":    "Canon/Canon EOS R8",
+    "GFX-50":          "Fujifilm/GFX-50",
+    "X-T5":            "Fujifilm/X-T5",
+    "Fujifilm X-Pro1": "Fujifilm/Fujifilm X-Pro1",
 }
 
 # ── EXIF 정규화 이름 → 드라이브 실제 폴더명 오버라이드 ──────────────────────────
